@@ -4,7 +4,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/AbnerSC/ssh-tunnel-go?style=flat&label=Stars)](https://github.com/AbnerSC/ssh-tunnel-go/stargazers)
 [![Docker Pulls](https://img.shields.io/docker/pulls/babyfly/ssh-tunnel?label=Docker%20Pulls)](https://hub.docker.com/r/babyfly/ssh-tunnel)
 
-***GitHub***：[https://github.com/AbnerSC/ssh-tunnel.git](https://github.com/AbnerSC/ssh-tunnel-go.git)
+***GitHub***：[https://github.com/AbnerSC/ssh-tunnel-go.git](https://github.com/AbnerSC/ssh-tunnel-go.git)
 
 ### Go 1.27.3
 
