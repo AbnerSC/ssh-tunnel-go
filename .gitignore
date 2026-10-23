@@ -1,0 +1,15 @@
+# 构建产物
+/ssh-tunnel
+/ssh-tunnel.exe
+/dist/
+
+# 运行日志（容器内挂载到 /app/logs）
+/logs/
+
+# 测试与覆盖率
+*.test
+coverage.out
+
+# IDE
+.idea/
+.vscode/
