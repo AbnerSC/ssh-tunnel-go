@@ -101,7 +101,9 @@ func handleSocks5(conn net.Conn, creds Credentials, route *Route) {
 	if err := writeAll(conn, replyFixed(replySucceeded)); err != nil {
 		return
 	}
-	logging.Info("socks5", "目标连接成功", "target", targetAddr, "remote", remote)
+	// 每连接成功日志降到 Debug：压力场景下每秒数百条会把日志刷成噪声，
+	// 汇总信息改由 main 的周期性统计（见 stats.go）输出
+	logging.Debug("socks5", "目标连接成功", "target", targetAddr, "remote", remote)
 	started := time.Now()
 	Relay(conn, target)
 	// 连接存活时长是区分「握手即被对端断开」与「长时间挂起」的关键信号

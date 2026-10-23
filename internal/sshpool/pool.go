@@ -29,6 +29,10 @@ const (
 	keepAliveMaxFails = 3
 	// reconnectWait 连接失败/断开后的重试间隔（与 Java 版 ERROR_WAIT_TIME 一致）
 	reconnectWait = 5 * time.Second
+	// maxReconnectWait 连续失败时的退避上限。
+	// 服务器宕机/密码错误时若无上限，每个槽位每 5s 重试一次，
+	// 6 条会话就是每分钟 72 次无效握手与 72 行失败日志；指数退避后降为约 6 次/分钟。
+	maxReconnectWait = 60 * time.Second
 	// dialAttempts 单次代理请求最多尝试的会话数。
 	// 轮询命中的会话可能刚好断开，换一条健康会话重试，
 	// 避免把偶发断连直接丢给客户端。
@@ -181,22 +185,28 @@ func (p *Pool) nextIndex() int {
 // runSlot 维护单个池位的状态机：连接 → 心跳保活 → 断开 → 退避重连。
 func (p *Pool) runSlot(ctx context.Context, idx int) {
 	server := p.serverAddr()
+	// fails 连续失败次数，驱动指数退避；连接成功后清零
+	fails := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		logging.Info("ssh", "尝试创建连接", "server", server, "slot", idx)
+		logging.Info("ssh", "尝试创建连接", "server", server, "slot", idx, "attempt", fails+1)
 		c, err := p.connect(ctx, idx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			logging.Warn("ssh", "创建连接失败", "server", server, "slot", idx, "err", err)
-			if !sleepCtx(ctx, reconnectDelay(idx)) {
+			fails++
+			delay := reconnectDelay(idx, fails)
+			logging.Warn("ssh", "创建连接失败", "server", server, "slot", idx,
+				"fails", fails, "nextRetry", delay.Round(time.Second), "err", err)
+			if !sleepCtx(ctx, delay) {
 				return
 			}
 			continue
 		}
+		fails = 0
 		logging.Info("ssh", "创建连接成功", "server", server, "slot", idx)
 		p.slots[idx].Store(c)
 		p.electMain()
@@ -209,8 +219,11 @@ func (p *Pool) runSlot(ctx context.Context, idx int) {
 		c.close()
 		p.slots[idx].CompareAndSwap(c, nil)
 		p.electMain()
+		// 断线后的首次重连沿用 5s 固定等待（与 Java 版一致），
+		// 若重连继续失败则转为指数退避
+		fails = 1
 		logging.Warn("ssh", "发生异常，断开连接", "server", server, "slot", idx)
-		if !sleepCtx(ctx, reconnectDelay(idx)) {
+		if !sleepCtx(ctx, reconnectDelay(idx, fails)) {
 			return
 		}
 	}
@@ -355,8 +368,19 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// reconnectDelay 在固定退避上按槽位错开，避免所有会话在同一时刻集中重连
+// reconnectDelay 计算重连等待：按连续失败次数指数退避（5s 起，封顶 60s），
+// 并在槽位维度错开 250ms，避免所有会话在同一时刻集中重连
 // （服务器重启后同时建连、同时超时，形成周期性的惊群）。
-func reconnectDelay(idx int) time.Duration {
-	return reconnectWait + time.Duration(idx%8)*250*time.Millisecond
+func reconnectDelay(idx, fails int) time.Duration {
+	if fails < 1 {
+		fails = 1
+	}
+	d := reconnectWait
+	for i := 1; i < fails && d < maxReconnectWait; i++ {
+		d *= 2
+	}
+	if d > maxReconnectWait {
+		d = maxReconnectWait
+	}
+	return d + time.Duration(idx%8)*250*time.Millisecond
 }

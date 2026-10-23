@@ -79,3 +79,5 @@ curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
 - [X] 内置 geosite 数据(`dlc.dat`)，`-direct-cn` 一键中国域名全量直连(也可指定其它 geosite 列表)
 - [X] 强制走隧道域名配置(`-force-domain`)，用于抵消直连规则的误伤（如 `geosite:cn` 收录 `googleapis.cn` 导致 Google Play 更新失效）
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口
+- [X] 周期性运行统计日志（每 5 分钟输出活跃/累计连接数与上下行字节），逐连接日志可用 `LOG_LEVEL=debug` 打开
+- [X] SSH 会话重连指数退避（5s 起、60s 封顶，按槽位错开），服务器不可用时避免无效握手风暴与日志刷屏

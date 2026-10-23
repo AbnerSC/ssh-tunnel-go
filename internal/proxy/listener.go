@@ -32,6 +32,9 @@ func Serve(ln net.Listener, component string, handler func(net.Conn)) {
 			continue
 		}
 		go func() {
+			activeConns.Add(1)
+			totalConns.Add(1)
+			defer activeConns.Add(-1)
 			defer func() {
 				if r := recover(); r != nil {
 					logging.Error(component, "连接处理异常，已关闭该连接",

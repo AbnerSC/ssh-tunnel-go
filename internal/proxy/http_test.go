@@ -125,6 +125,47 @@ func TestHTTPAuthWithLFOnlyClient(t *testing.T) {
 	}
 }
 
+// TestHTTPLeadingBlankLineBeforeRequestLine 验证请求行之前的空行被忽略。
+//
+// RFC 7230 §3.5 要求接收方忽略请求行前的空行；若在此返回空头部，
+// 上层解析 lines[0] 会越界 panic，连接被直接关闭。
+func TestHTTPLeadingBlankLineBeforeRequestLine(t *testing.T) {
+	echoHost, echoPort := startEchoServer(t)
+	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
+
+	conn, br := dialProxy(t, addr)
+	req := fmt.Sprintf("\r\n\r\nCONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n\r\n", echoHost, echoPort, echoHost)
+	writeConn(t, conn, []byte(req))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 200 Connection Established") {
+		t.Fatalf("前导空行应被忽略: %q", head)
+	}
+
+	payload := []byte("after-blank-line")
+	writeConn(t, conn, payload)
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("读取隧道数据失败: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("隧道数据不一致: %q", got)
+	}
+}
+
+// TestHTTPEmptyHeadIsBadRequest 校验空头部的兜底处理：返回 400 而不是 panic。
+func TestHTTPEmptyHeadIsBadRequest(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go func() {
+		defer server.Close()
+		handleHTTPRequest(server, bufio.NewReader(server), nil, Credentials{}, directRoute("http"), nil)
+	}()
+
+	br := bufio.NewReader(client)
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("空头部应返回 400: %q", head)
+	}
+}
+
 // TestHTTPForwardPhaseClearsReadDeadline 验证进入转发阶段后读截止时间被清除。
 // 残留的 15s 头部超时会让持续超过 15s 的大文件下载被截断。
 func TestHTTPForwardPhaseClearsReadDeadline(t *testing.T) {

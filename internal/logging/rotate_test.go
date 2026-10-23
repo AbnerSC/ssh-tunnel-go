@@ -47,6 +47,32 @@ func TestRotatorWriteAndRotate(t *testing.T) {
 	}
 }
 
+// TestRotatorFlushesWithoutFurtherWrites 验证日志不依赖后续写入也会落盘。
+//
+// 高并发降噪后压测期间几乎没有日志，若只在 Write 时按时间 flush，
+// 启动日志会一直留在缓冲里，tail -f 看不到，异常退出即丢失。
+func TestRotatorFlushesWithoutFurtherWrites(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRotator(dir, 30, 1<<30)
+	if err != nil {
+		t.Fatalf("创建 Rotator 失败: %v", err)
+	}
+	defer r.Close()
+
+	if _, err := r.Write([]byte("startup\n")); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	path := filepath.Join(dir, logFileName)
+	deadline := time.Now().Add(3 * flushInterval)
+	for time.Now().Before(deadline) {
+		if data, _ := os.ReadFile(path); strings.Contains(string(data), "startup") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("写入后 %v 内未落盘", 3*flushInterval)
+}
+
 func TestRotatorCleansOldArchives(t *testing.T) {
 	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "ssh-tunnel.2000-01-01.log")

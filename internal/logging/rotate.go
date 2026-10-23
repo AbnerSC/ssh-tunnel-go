@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,15 @@ import (
 	"sync"
 	"time"
 )
+
+// flushInterval 缓冲写入的落盘间隔。
+//
+// 文件写入改为带缓冲：高频日志（每连接多行）原来每行一次 write 系统调用，
+// 压力场景下每秒数百次；缓冲后按 64KB 或 1 秒落盘，系统调用量下降两个数量级。
+// 落盘靠后台 flushLoop 定时触发，而不是依赖下一次 Write：写入稀疏时
+// （如高并发降噪后压测期间几乎没有日志）只靠 Write 判断会让日志长期留在
+// 缓冲里，tail -f 看不到，进程异常退出还会丢失。
+const flushInterval = time.Second
 
 // Rotator 按天滚动的文件写入器，语义与 Java 版 logback 配置一致：
 //   - 当前文件：logs/ssh-tunnel.log
@@ -22,9 +32,15 @@ type Rotator struct {
 	maxDays  int
 	maxBytes int64
 
-	mu  sync.Mutex
-	f   *os.File
-	day string
+	mu        sync.Mutex
+	f         *os.File
+	bw        *bufio.Writer
+	lastFlush time.Time
+	day       string
+
+	// done 通知后台刷盘协程退出；closeOnce 保证重复 Close 不会 panic
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewRotator 创建并打开滚动日志文件。
@@ -38,15 +54,40 @@ func NewRotator(dir string, maxDays int, maxBytes int64) (*Rotator, error) {
 		maxDays:  maxDays,
 		maxBytes: maxBytes,
 		day:      time.Now().Format("2006-01-02"),
+		done:     make(chan struct{}),
 	}
 	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	r.f = f
+	r.bw = bufio.NewWriterSize(f, 64*1024)
+	r.lastFlush = time.Now()
 	// 启动时清理一次历史归档，避免只运行不跨天时长期不回收
 	r.cleanupLocked(r.day)
+	go r.flushLoop()
 	return r, nil
+}
+
+// flushLoop 周期性把写缓冲落盘。
+//
+// 日志写入稀疏时只能靠它保证最新日志及时可见（tail -f）且不因异常退出而丢失。
+func (r *Rotator) flushLoop() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-ticker.C:
+			r.mu.Lock()
+			if r.bw != nil {
+				_ = r.bw.Flush()
+				r.lastFlush = time.Now()
+			}
+			r.mu.Unlock()
+		}
+	}
 }
 
 // Write 实现 io.Writer。
@@ -58,24 +99,56 @@ func (r *Rotator) Write(p []byte) (int, error) {
 	if today != r.day {
 		r.rotateLocked(today)
 	}
-	if r.f == nil {
-		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
+	if r.bw == nil {
+		if err := r.openLocked(); err != nil {
 			return 0, err
 		}
-		r.f = f
 	}
-	return r.f.Write(p)
+	n, err := r.bw.Write(p)
+	if time.Since(r.lastFlush) >= flushInterval {
+		if ferr := r.bw.Flush(); ferr != nil && err == nil {
+			err = ferr
+		}
+		r.lastFlush = time.Now()
+	}
+	return n, err
 }
 
 // Close 关闭当前日志文件。
 func (r *Rotator) Close() error {
+	r.closeOnce.Do(func() { close(r.done) })
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.closeLocked()
+}
+
+// openLocked 打开当前日志文件并绑定写缓冲。
+func (r *Rotator) openLocked() error {
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	r.f = f
+	r.bw = bufio.NewWriterSize(f, 64*1024)
+	r.lastFlush = time.Now()
+	return nil
+}
+
+// closeLocked 先把缓冲落盘再关闭文件。
+func (r *Rotator) closeLocked() error {
 	if r.f == nil {
 		return nil
 	}
-	err := r.f.Close()
+	var err error
+	if r.bw != nil {
+		if ferr := r.bw.Flush(); ferr != nil {
+			err = ferr
+		}
+		r.bw = nil
+	}
+	if cerr := r.f.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
 	r.f = nil
 	return err
 }
@@ -83,10 +156,8 @@ func (r *Rotator) Close() error {
 // rotateLocked 把当前文件归档为 <旧日期> 并打开新文件。
 func (r *Rotator) rotateLocked(today string) {
 	oldDay := r.day
-	if r.f != nil {
-		_ = r.f.Close()
-		r.f = nil
-	}
+	// 归档前必须把缓冲落盘，否则未刷出的日志会写进新文件甚至丢失
+	_ = r.closeLocked()
 	if info, err := os.Stat(r.path); err == nil && info.Size() > 0 {
 		archive := filepath.Join(r.dir, fmt.Sprintf("ssh-tunnel.%s.log", oldDay))
 		// 同日重启后再跨天可能撞名，先删旧归档再改名（与 logback 覆盖语义一致）
@@ -94,9 +165,7 @@ func (r *Rotator) rotateLocked(today string) {
 		_ = os.Rename(r.path, archive)
 	}
 	r.day = today
-	if f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-		r.f = f
-	}
+	_ = r.openLocked()
 	r.cleanupLocked(today)
 }
 

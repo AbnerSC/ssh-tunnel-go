@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // relayBufSize 单向转发缓冲大小。SSH 通道单包上限 32KB，取 4 倍可减少
@@ -12,6 +13,7 @@ const relayBufSize = 128 * 1024
 
 // Relay 在两条连接之间做双向转发。
 //
+// 参数约定：a 为客户端连接，b 为目标连接；据此区分上行/下行字节统计。
 // 正常 EOF 时只做半关闭（CloseWrite），保留反向数据通道——上传结束不代表下载结束；
 // 出错时双向关闭，避免对端 goroutine 永久阻塞。
 func Relay(a, b net.Conn) {
@@ -23,7 +25,7 @@ func Relay(a, b net.Conn) {
 		})
 	}
 
-	pipe := func(dst, src net.Conn, done chan<- struct{}) {
+	pipe := func(dst, src net.Conn, counter *atomic.Int64, done chan<- struct{}) {
 		defer func() { done <- struct{}{} }()
 		// 不用 io.Copy：其内部缓冲固定 32KB，且目标为 *net.TCPConn 时会走
 		// ReadFrom 而忽略自定义缓冲，导致包装后的 SSH 通道侧始终是小块读写。
@@ -31,6 +33,7 @@ func Relay(a, b net.Conn) {
 		for {
 			n, rerr := src.Read(buf)
 			if n > 0 {
+				counter.Add(int64(n))
 				if _, werr := dst.Write(buf[:n]); werr != nil {
 					closeBoth()
 					return
@@ -48,8 +51,8 @@ func Relay(a, b net.Conn) {
 	}
 
 	done := make(chan struct{}, 2)
-	go pipe(b, a, done)
-	go pipe(a, b, done)
+	go pipe(b, a, &bytesUp, done)
+	go pipe(a, b, &bytesDown, done)
 	<-done
 	<-done
 	closeBoth()

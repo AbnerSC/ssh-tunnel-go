@@ -109,6 +109,31 @@ func probe(port int) int {
 	return 0
 }
 
+// statsInterval 汇总统计的输出间隔。
+//
+// 逐连接日志改为 Debug 后，用一条周期性汇总代替：既能看出隧道是否在承载流量，
+// 又不会在高并发时把日志刷满。
+const statsInterval = 5 * time.Minute
+
+// startStatsLoop 周期性输出代理运行统计。
+func startStatsLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(statsInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s := proxy.Snapshot()
+				logging.Info("main", "代理统计",
+					"active", s.Active, "total", s.Total,
+					"upMB", s.UpBytes/1024/1024, "downMB", s.DownBytes/1024/1024)
+			}
+		}
+	}()
+}
+
 // run 装配并运行全部代理/转发任务，返回进程退出码（0 正常，1 启动失败，2 配置错误）。
 func run(ctx context.Context, args []string) int {
 	cfg, err := config.Load(config.NewResolver(args))
@@ -138,6 +163,7 @@ func run(ctx context.Context, args []string) int {
 
 	direct := proxy.LocalDialer{Timeout: 3 * time.Second}
 	creds := proxy.NewCredentials(cfg.SocksUser, cfg.SocksPassword)
+	startStatsLoop(ctx)
 
 	var listeners []net.Listener
 	if cfg.SocksPort > 0 {

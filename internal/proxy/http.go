@@ -57,7 +57,7 @@ func ServeHTTP(ln net.Listener, creds Credentials, route *Route) {
 func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 	defer conn.Close()
 	remote := conn.RemoteAddr()
-	logging.Info("http", "http代理收到连接请求", "remote", remote)
+	logging.Debug("http", "http代理收到连接请求", "remote", remote)
 
 	br := bufio.NewReaderSize(conn, httpReadBuffer)
 	for {
@@ -80,6 +80,12 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Credentials, route *Route,
 	remote net.Addr) bool {
 	lines := splitHeaderLines(head)
+	// readHeader 已跳过请求行前的空行，正常不会为空；这里兜底防御，
+	// 避免畸形输入（如只有 CRLF 的连接）导致 lines[0] 越界 panic
+	if len(lines) == 0 {
+		writeAndClose(conn, replyBadRequest)
+		return false
+	}
 	// 用 Fields 容忍多个空格，同时避免空字段导致 index 越界
 	fields := strings.Fields(lines[0])
 	if len(fields) < 2 {
@@ -123,7 +129,7 @@ func handleConnect(conn net.Conn, br *bufio.Reader, uri string, route *Route, re
 		writeAndClose(conn, replyBadRequest)
 		return
 	}
-	logging.Info("http", "http代理 CONNECT 请求", "target", net.JoinHostPort(host, strconv.Itoa(port)), "remote", remote)
+	logging.Debug("http", "http代理 CONNECT 请求", "target", net.JoinHostPort(host, strconv.Itoa(port)), "remote", remote)
 
 	target, err := route.Dial(context.Background(), host, port)
 	if err != nil {
@@ -140,7 +146,7 @@ func handleConnect(conn net.Conn, br *bufio.Reader, uri string, route *Route, re
 	if err := writeAll(conn, replyEstablished); err != nil {
 		return
 	}
-	logging.Info("http", "http代理目标连接成功", "target", net.JoinHostPort(host, strconv.Itoa(port)), "remote", remote)
+	logging.Debug("http", "http代理目标连接成功", "target", net.JoinHostPort(host, strconv.Itoa(port)), "remote", remote)
 	Relay(&bufferedConn{Conn: conn, r: br}, target)
 }
 
@@ -189,7 +195,7 @@ func handleForward(conn net.Conn, br *bufio.Reader, method, uri, version string,
 	sb.WriteString("Connection: close\r\n\r\n")
 
 	targetAddr := net.JoinHostPort(host, strconv.Itoa(port))
-	logging.Info("http", "http代理转发请求", "method", method, "target", targetAddr, "path", path, "remote", remote)
+	logging.Debug("http", "http代理转发请求", "method", method, "target", targetAddr, "path", path, "remote", remote)
 	target, err := route.Dial(context.Background(), host, port)
 	if err != nil {
 		logging.Warn("http", "http代理无法连接请求", "target", targetAddr, "err", err)
@@ -205,7 +211,7 @@ func handleForward(conn net.Conn, br *bufio.Reader, method, uri, version string,
 	if err := drainBuffered(br, target); err != nil {
 		return
 	}
-	logging.Info("http", "http代理目标连接成功", "target", targetAddr, "remote", remote)
+	logging.Debug("http", "http代理目标连接成功", "target", targetAddr, "remote", remote)
 	Relay(&bufferedConn{Conn: conn, r: br}, target)
 }
 
@@ -225,6 +231,15 @@ func readHeader(conn net.Conn, br *bufio.Reader) ([]byte, error) {
 	for {
 		line, err := br.ReadSlice('\n')
 		if isBlankLine(line) {
+			if len(head) == 0 {
+				// 请求行之前的空行按 RFC 7230 §3.5 应被忽略（部分客户端复用连接时会
+				// 多发一个 CRLF）。若在此直接返回，调用方拿到空头部会在解析请求行时
+				// 越界 panic，因此继续读到真正的请求行为止。
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
 			// head 已含此前各行的行尾 CRLF，去掉最后一行的行尾即为调用方约定的头部
 			switch {
 			case len(head) >= 2 && head[len(head)-2] == '\r':
