@@ -29,8 +29,8 @@ services:
       - SSH_PORT=2
       - SSH_PASSWORD=server_pwd
       - SSH_POOL=6
-      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1
-      - DIRECT_DOMAIN=localhost,mmxx.fun,05200809.xyz
+      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8
+      - DIRECT_DOMAIN=localhost,xxxx.fun,xxxx.xyz
       - DIRECT_CN=true
     ports:
       - 16666:6666
