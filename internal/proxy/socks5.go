@@ -20,6 +20,16 @@ const (
 	socksAuthVersion = 1
 	// socksCmdConnect RFC1928 CONNECT 命令
 	socksCmdConnect = 1
+
+	// 以下为 RFC1928 应答码（REP）
+	// replySucceeded 请求成功
+	replySucceeded = 0x00
+	// replyNetworkUnreachable 目标网络/主机不可达
+	replyNetworkUnreachable = 0x03
+	// replyCmdNotSupported 不支持的命令（UDP ASSOCIATE / BIND）
+	replyCmdNotSupported = 0x07
+	// replyAddrNotSupported 不支持的地址类型
+	replyAddrNotSupported = 0x08
 )
 
 // ServeSocks5 启动 SOCKS5 服务。
@@ -71,30 +81,32 @@ func handleSocks5(conn net.Conn, creds Credentials, route *Route) {
 	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(socksHandshakeTimeout))
-	host, port, rawAddr, ok := readRequest(conn, remote)
+	host, port, atyp, ok := readRequest(conn, remote)
 	if !ok {
 		return
 	}
 	// 握手完成，清除读超时：转发阶段是长连接，不能带任何截止时间
 	_ = conn.SetReadDeadline(time.Time{})
 	targetAddr := net.JoinHostPort(host, strconv.Itoa(port))
-	logging.Debug("socks5", "收到代理请求", "target", targetAddr, "remote", remote)
+	logging.Debug("socks5", "收到代理请求", "target", targetAddr, "atyp", atypName(atyp), "remote", remote)
 
 	target, err := route.Dial(context.Background(), host, port)
 	if err != nil {
-		logging.Warn("socks5", "无法连接目标", "target", targetAddr, "err", err)
-		// 0x03 = Network unreachable，失败应答同样回显请求地址
-		_ = writeAll(conn, appendReply(0x03, rawAddr))
+		logging.Warn("socks5", "无法连接目标", "target", targetAddr, "atyp", atypName(atyp), "err", err)
+		_ = writeAll(conn, replyFixed(replyNetworkUnreachable))
 		return
 	}
 	defer target.Close()
 
-	if err := writeAll(conn, appendReply(0x00, rawAddr)); err != nil {
+	if err := writeAll(conn, replyFixed(replySucceeded)); err != nil {
 		return
 	}
 	logging.Info("socks5", "目标连接成功", "target", targetAddr, "remote", remote)
+	started := time.Now()
 	Relay(conn, target)
-	logging.Debug("socks5", "连接已断开", "target", targetAddr, "remote", remote)
+	// 连接存活时长是区分「握手即被对端断开」与「长时间挂起」的关键信号
+	logging.Debug("socks5", "连接已断开", "target", targetAddr, "remote", remote,
+		"elapsed", time.Since(started).Round(time.Millisecond))
 }
 
 func hasMethod(methods []byte, want byte) bool {
@@ -142,76 +154,93 @@ func authSocks5(conn net.Conn, creds Credentials, remote net.Addr) bool {
 	return writeAll(conn, []byte{1, 0}) == nil
 }
 
-// readRequest 读取连接请求，返回目标主机、端口与应答所需的原始地址字段（RSV/ATYP/ADDR/PORT）。
-func readRequest(conn net.Conn, remote net.Addr) (string, int, []byte, bool) {
+// readRequest 读取连接请求，返回目标主机、端口与地址类型（ATYP）。
+//
+// 只接受 CONNECT：UDP ASSOCIATE 与 BIND 无法通过 SSH 隧道承载（隧道只有
+// TCP 通道），按 RFC1928 明确回 REP=0x07，让客户端立即回退到 TCP；
+// 静默关闭会让客户端一直等到超时，表现为「连上了但打不开」。
+func readRequest(conn net.Conn, remote net.Addr) (string, int, byte, bool) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
-		return "", 0, nil, false
+		return "", 0, 0, false
 	}
-	if hdr[0] != 5 || hdr[1] != socksCmdConnect {
-		// 不支持的命令：与 Java 版一致，不回包直接关闭
-		logging.Debug("socks5", "不支持的请求命令", "cmd", hdr[1], "remote", remote)
-		return "", 0, nil, false
+	if hdr[0] != 5 {
+		return "", 0, 0, false
+	}
+	if hdr[1] != socksCmdConnect {
+		logging.Debug("socks5", "不支持的请求命令，回 0x07", "cmd", hdr[1], "remote", remote)
+		_ = writeAll(conn, replyFixed(replyCmdNotSupported))
+		return "", 0, 0, false
 	}
 
 	var host string
-	var addrBytes []byte
-	// addrPrefix 域名类型的长度字节：应答原样回显请求地址（Java 版 bytes[2:reqLen]），
-	// 缺了它客户端无法解析应答
-	var addrPrefix []byte
 	switch hdr[3] {
 	case 0x01: // IPv4
-		addrBytes = make([]byte, 4)
-		if _, err := io.ReadFull(conn, addrBytes); err != nil {
-			return "", 0, nil, false
+		addr := make([]byte, 4)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", 0, 0, false
 		}
-		host = net.IP(addrBytes).String()
-	case 0x03: // 域名
+		host = net.IP(addr).String()
+	case 0x03: // 域名，交给对端按域名解析
 		var l [1]byte
 		if _, err := io.ReadFull(conn, l[:]); err != nil {
-			return "", 0, nil, false
+			return "", 0, 0, false
 		}
-		addrPrefix = []byte{l[0]}
-		addrBytes = make([]byte, int(l[0]))
-		if _, err := io.ReadFull(conn, addrBytes); err != nil {
-			return "", 0, nil, false
+		addr := make([]byte, int(l[0]))
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", 0, 0, false
 		}
-		host = string(addrBytes)
+		host = string(addr)
 	case 0x04: // IPv6，透传给服务端按字面地址连接
-		addrBytes = make([]byte, 16)
-		if _, err := io.ReadFull(conn, addrBytes); err != nil {
-			return "", 0, nil, false
+		addr := make([]byte, 16)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", 0, 0, false
 		}
 		var arr [16]byte
-		copy(arr[:], addrBytes)
+		copy(arr[:], addr)
 		host = netip.AddrFrom16(arr).String()
 	default:
-		return "", 0, nil, false
+		logging.Debug("socks5", "不支持的地址类型，回 0x08", "atyp", hdr[3], "remote", remote)
+		_ = writeAll(conn, replyFixed(replyAddrNotSupported))
+		return "", 0, 0, false
 	}
 
 	var portBytes [2]byte
 	if _, err := io.ReadFull(conn, portBytes[:]); err != nil {
-		return "", 0, nil, false
+		return "", 0, 0, false
 	}
 	port := int(binary.BigEndian.Uint16(portBytes[:]))
 	if host == "" || port <= 0 || port > 65535 {
-		// 空域名/非法端口无法构成有效目标，直接关闭（不回包，与不支持的命令一致）
+		// 空域名/非法端口无法构成有效目标，直接关闭
 		logging.Debug("socks5", "请求目标非法", "host", host, "port", port, "remote", remote)
-		return "", 0, nil, false
+		return "", 0, 0, false
 	}
-
-	raw := make([]byte, 0, 2+len(addrPrefix)+len(addrBytes)+2)
-	raw = append(raw, hdr[2], hdr[3])
-	raw = append(raw, addrPrefix...)
-	raw = append(raw, addrBytes...)
-	raw = append(raw, portBytes[:]...)
-	return host, port, raw, true
+	return host, port, hdr[3], true
 }
 
-func appendReply(code byte, rawAddr []byte) []byte {
-	out := make([]byte, 0, 2+len(rawAddr))
-	out = append(out, 5, code)
-	return append(out, rawAddr...)
+// replyFixed 构造 REP 应答，BND.ADDR 固定为 0.0.0.0:0。
+//
+// 不回显请求地址：请求是域名(ATYP=0x03)时，回显会让只按固定长度
+// （IPv4 4 字节 / IPv6 16 字节）读取 BND.ADDR 的客户端解析错位，
+// 表现为服务端日志显示连接成功、客户端却立刻断开重连。
+// 大多数实现（curl、浏览器、各类 SDK）都会忽略 BND.ADDR，固定回环地址最稳妥。
+func replyFixed(code byte) []byte {
+	return []byte{5, code, 0, 0x01, 0, 0, 0, 0, 0, 0}
+}
+
+// atypName 供日志区分目标是域名还是 IP 字面量：
+// 域名说明客户端做的是远端 DNS，IP 则说明解析发生在客户端侧。
+func atypName(atyp byte) string {
+	switch atyp {
+	case 0x01:
+		return "ipv4"
+	case 0x03:
+		return "domain"
+	case 0x04:
+		return "ipv6"
+	default:
+		return "unknown"
+	}
 }
 
 func writeAll(w io.Writer, data []byte) error {

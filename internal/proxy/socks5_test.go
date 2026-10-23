@@ -98,7 +98,7 @@ func TestSocks5NoAuth(t *testing.T) {
 	}
 
 	writeConn(t, conn, socksRequest(echoHost, echoPort))
-	// 应答回显请求地址：VER REP RSV ATYP + IPv4(4) + PORT(2)
+	// 应答固定为 VER REP RSV ATYP + 0.0.0.0(4) + PORT(2)，不回显请求地址
 	reply := mustRead(t, conn, 10)
 	if reply[0] != 5 || reply[1] != 0 || reply[3] != 1 {
 		t.Fatalf("CONNECT 应答错误: %v", reply)
@@ -126,10 +126,11 @@ func TestSocks5DomainATYP(t *testing.T) {
 
 	host := "127.0.0.1"
 	writeConn(t, conn, socksDomainRequest(host, echoPort))
-	// 应答回显请求地址：VER REP + RSV ATYP LEN + 域名 + PORT
-	reply := mustRead(t, conn, 2+3+len(host)+2)
-	if reply[0] != 5 || reply[1] != 0 || reply[3] != 3 || string(reply[5:5+len(host)]) != host {
-		t.Fatalf("域名类型应答错误: %v", reply)
+	// 域名请求的应答同样固定为 IPv4 类型：回显域名会让只按固定长度
+	// 读取 BND.ADDR 的客户端解析错位
+	reply := mustRead(t, conn, 10)
+	if reply[0] != 5 || reply[1] != 0 || reply[3] != 1 {
+		t.Fatalf("域名请求的应答应固定为 IPv4 类型: %v", reply)
 	}
 
 	payload := []byte("domain ok")
@@ -246,7 +247,39 @@ func TestSocks5DialFailure(t *testing.T) {
 }
 
 func TestSocks5UnsupportedCommand(t *testing.T) {
+	for _, cmd := range []byte{0x02, 0x03} { // BIND / UDP ASSOCIATE
+		addr := startSocks5(t, Credentials{}, directRoute("socks5"))
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			t.Fatalf("连接代理失败: %v", err)
+		}
+
+		writeConn(t, conn, []byte{5, 1, 0})
+		mustRead(t, conn, 2)
+		// 隧道只有 TCP 通道，UDP ASSOCIATE/BIND 必须明确回 0x07，
+		// 让客户端立即回退；静默关闭会让客户端挂到超时
+		writeConn(t, conn, []byte{5, cmd, 0, 1, 0, 0, 0, 0, 0, 0})
+
+		reply := mustRead(t, conn, 10)
+		if reply[0] != 5 || reply[1] != 0x07 {
+			_ = conn.Close()
+			t.Fatalf("cmd=0x%02x 应返回 REP=0x07: %v", cmd, reply)
+		}
+
+		// 应答之后应关闭连接
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			_ = conn.Close()
+			t.Fatalf("cmd=0x%02x 应答后应关闭连接", cmd)
+		}
+		_ = conn.Close()
+	}
+}
+
+func TestSocks5IPv6ATYP(t *testing.T) {
+	_, echoPort := startEchoServer(t)
 	addr := startSocks5(t, Credentials{}, directRoute("socks5"))
+
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		t.Fatalf("连接代理失败: %v", err)
@@ -255,11 +288,21 @@ func TestSocks5UnsupportedCommand(t *testing.T) {
 
 	writeConn(t, conn, []byte{5, 1, 0})
 	mustRead(t, conn, 2)
-	// CMD=2(BIND)：与 Java 版一致，不回包直接关闭
-	writeConn(t, conn, []byte{5, 2, 0, 1, 127, 0, 0, 1, 0, 80})
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := conn.Read(make([]byte, 1)); err == nil {
-		t.Fatal("不支持的命令应直接关闭连接")
+	// ATYP=0x04：用 ::ffff:127.0.0.1（IPv4 映射地址）验证解析路径与应答格式
+	req := []byte{5, 1, 0, 4}
+	req = append(req, net.ParseIP("::ffff:127.0.0.1").To16()...)
+	req = append(req, byte(echoPort>>8), byte(echoPort))
+	writeConn(t, conn, req)
+
+	reply := mustRead(t, conn, 10)
+	if reply[0] != 5 || reply[1] != 0 || reply[3] != 1 {
+		t.Fatalf("IPv6 请求的应答应固定为 IPv4 类型: %v", reply)
+	}
+
+	payload := []byte("ipv6 ok")
+	writeConn(t, conn, payload)
+	if got := mustRead(t, conn, len(payload)); string(got) != string(payload) {
+		t.Fatalf("回显不一致: %q", got)
 	}
 }
