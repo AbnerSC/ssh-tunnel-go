@@ -3,8 +3,10 @@
 #
 # 多阶段构建：
 #   - 编译阶段固定在构建机原生架构（--platform=$BUILDPLATFORM），
-#     通过 GOOS/GOARCH 交叉编译出目标架构的静态二进制，无需 QEMU 模拟
-#   - 运行阶段基于 debian bookworm-slim（官方多架构镜像），仅拷贝静态二进制
+#     通过 GOOS/GOARCH 交叉编译出目标架构的静态二进制，编译阶段无需 QEMU 模拟
+#   - 运行阶段基于 debian bookworm-slim（官方多架构镜像），拷贝静态二进制并安装
+#     ca-certificates / curl；该阶段的 apt-get 以目标架构执行，跨架构构建需要 QEMU
+#     （CI 已通过 setup-qemu 提供）
 #
 # 与 Java 版镜像的兼容性：
 #   - 环境变量 SOCKS_PORT / HTTP_PORT / SOCKS_USER / SOCKS_PASSWORD /
@@ -17,16 +19,17 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t ssh-tunnel:latest --push .
 # 模块代理默认不注入（GitHub Actions / 本地直连 Go 官方 proxy.golang.org）；
-# 国内环境构建（Gitea Actions）显式注入加速依赖下载：
+# 国内环境构建由 Gitea Actions 注入内部 Go 代理加速依赖下载；
+# 手动构建同样可选注入公共代理：
 #   --build-arg GOPROXY=https://goproxy.cn,direct
-# 同样可选的 apt 镜像源（加速运行阶段 ca-certificates 安装）：
+# 同样可选的 apt 镜像源（加速运行阶段 ca-certificates / curl 安装）：
 #   --build-arg APT_MIRROR=repo.huaweicloud.com
 # =====================================================================
 
-# 运行时基础镜像：必须声明在第一个 FROM 之前（全局 ARG），否则后续 FROM 无法引用
+# 全局 ARG：构建与运行基础镜像都必须在第一个 FROM 之前声明，否则后续 FROM 无法引用
 ARG GO_IMAGE=golang:1.27-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
-# 可选：Debian apt 镜像源（仅运行阶段安装 ca-certificates 时生效）。
+# 可选：Debian apt 镜像源（仅运行阶段执行 apt-get 安装时生效）。
 # 默认不注入，保持官方 deb.debian.org；国内环境由 Gitea Actions 经 build-arg
 # 注入公共镜像源加速，为空时运行阶段跳过替换
 ARG APT_MIRROR=
@@ -84,7 +87,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# 运行时环境变量（均可选，未设置或为空则不传对应参数；详见 README）：
+# 运行时环境变量（均可选，未设置或为空则不生效；详见 README）：
 #   SOCKS_PORT     -> -D      本地 socks5 监听端口
 #   SOCKS_USER     -> -suser  socks5/http 代理账号
 #   SOCKS_PASSWORD -> -spwd   socks5/http 代理密码

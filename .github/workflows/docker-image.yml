@@ -7,6 +7,7 @@
 #   - Gitea 侧工作流只会被 Gitea Actions 读取，推送到自建 Nexus
 #
 # 触发方式：
+#   - 提交 PR 时仅执行代码校验（gofmt / vet / test），不推送镜像
 #   - 推送 release-v 开头的 tag（如 release-v1.2.3）自动构建，
 #     推送 版本号（1.2.3）+ latest 标签
 #   - 支持在 Actions 页面手动触发：选择 release-v 开头的 tag 时
@@ -101,7 +102,7 @@ jobs:
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
-      # arm64 跨架构构建需要 QEMU 模拟（运行阶段 FROM 目标架构基础镜像并执行 apk）
+      # arm64 跨架构构建需要 QEMU 模拟（运行阶段 FROM 目标架构基础镜像并执行 apt-get）
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
 

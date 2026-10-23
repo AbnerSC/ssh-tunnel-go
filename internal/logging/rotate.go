@@ -15,7 +15,7 @@ import (
 //   - 归档文件：logs/ssh-tunnel.yyyy-MM-dd.log
 //   - 保留 30 天，归档总量上限 1GB（超出时优先删除最旧的归档）
 //
-// 写入失败不会影响控制台输出（控制台在 MultiWriter 中排在前）。
+// 写入失败不会影响控制台输出（控制台由 fanoutWriter 在文件之后独立写出，错误被忽略）。
 type Rotator struct {
 	dir      string
 	path     string

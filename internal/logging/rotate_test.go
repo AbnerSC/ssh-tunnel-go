@@ -30,7 +30,7 @@ func TestRotatorWriteAndRotate(t *testing.T) {
 	if _, err := r.Write([]byte("line1\n")); err != nil {
 		t.Fatalf("写入失败: %v", err)
 	}
-	// 模拟跨天：把内部日期改成昨天，下一次写入应触发归档
+	// 模拟跨天：把内部日期改成 2000-01-02，下一次写入应触发归档
 	r.day = "2000-01-02"
 	if _, err := r.Write([]byte("line2\n")); err != nil {
 		t.Fatalf("写入失败: %v", err)

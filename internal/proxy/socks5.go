@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	// socksHandshakeTimeout 握手阶段超时：Java 版为「连接后 5s 内未收到数据即关闭」，
-	// 收到首个数据后即取消，这里用读超时等价实现。
+	// socksHandshakeTimeout 握手阶段读超时：对应 Java 版「连接后 5s 内未收到数据即关闭」，
+	// 这里按问候、认证、请求分阶段各限时 5s（见 handleSocks5）。
 	socksHandshakeTimeout = 5 * time.Second
 	// socksAuthVersion RFC1929 账号密码认证版本号
 	socksAuthVersion = 1

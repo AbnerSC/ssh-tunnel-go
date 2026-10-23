@@ -7,6 +7,7 @@
 #   - 本文件只会被 Gitea Actions 读取，推送到自建 Nexus
 #
 # 触发方式：
+#   - 推送 main 分支自动构建，仅推送 latest 标签
 #   - 推送 release-v 开头的 tag（如 release-v1.2.3）自动构建，
 #     推送 版本号（1.2.3）+ latest 标签
 #   - 支持在 Actions 页面手动触发（需 Gitea >= 1.21）：
@@ -40,7 +41,7 @@ env:
   # 自托管 runner 多在国内，注入 Go 模块代理加速依赖下载
   # （Dockerfile 中该 ARG 默认为空，仅由本工作流注入；GitHub 侧走官方 proxy.golang.org）
   GOPROXY: https://repo.pi.mmxx.fun/repository/go-public,direct
-  # 运行阶段安装 ca-certificates 时经公共镜像源加速
+  # 运行阶段安装 ca-certificates / curl 时经公共镜像源加速
   # （GitHub 侧不注入，直接使用官方 deb.debian.org）
   APT_MIRROR: repo.huaweicloud.com
   # buildkit（docker-container driver）拉取镜像不走 docker daemon 的 registry-mirrors，
