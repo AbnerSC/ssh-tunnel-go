@@ -31,6 +31,7 @@ services:
       - SSH_POOL=6
       - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8
       - DIRECT_DOMAIN=localhost,xxxx.fun,xxxx.xyz
+      - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn
       - DIRECT_CN=true
     ports:
       - 16666:6666
@@ -56,7 +57,6 @@ services:
 | `DIRECT_DOMAIN`  | `-direct-domain` | 直连域名，匹配主域名（逗号或空格分隔，可选）                                                   |
 | `DIRECT_CN`      | `-direct-cn`     | 中国域名全量直连，取值 `true` 启用默认 `cn` 列表，也可直接写 geosite 名(如 `cn,private`，可选) |
 | `FORCE_DOMAIN`   | `-force-domain`  | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                             |
-| `JAVA_OPTS`      | -                | 覆盖镜像内置的 JVM 调优参数（可选）                                                            |
 
 ### 使用测试
 
