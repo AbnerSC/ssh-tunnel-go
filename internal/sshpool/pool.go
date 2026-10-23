@@ -33,8 +33,6 @@ const (
 	// 轮询命中的会话可能刚好断开，换一条健康会话重试，
 	// 避免把偶发断连直接丢给客户端。
 	dialAttempts = 2
-	// socketBufferSize SSH 底层 TCP 收发缓冲区，匹配 2MB 通道窗口
-	socketBufferSize = 4 * 1024 * 1024
 )
 
 // ErrNoSession 当前没有可用的 SSH 会话。
@@ -246,8 +244,11 @@ func (p *Pool) connect(ctx context.Context, idx int) (*conn, error) {
 	}
 	if tcp, ok := raw.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
-		_ = tcp.SetReadBuffer(socketBufferSize)
-		_ = tcp.SetWriteBuffer(socketBufferSize)
+		// 刻意不调用 SetReadBuffer/SetWriteBuffer：
+		// 显式设置 SO_RCVBUF/SO_SNDBUF 会让内核置上 SOCK_RCVBUF_LOCK，
+		// 关闭接收窗口自动调优(tcp_moderate_rcvbuf)。实测公网高 RTT 链路下
+		// 窗口会被钉在 64~128KB，单向吞吐被压到约 1MB/s(约 100KB/RTT)，
+		// 而交给内核自动调优可随 BDP 增长到几 MB，吞吐提升一个数量级。
 	}
 	// 握手与认证共用同一超时，防止 auth 阶段无限阻塞
 	_ = raw.SetDeadline(time.Now().Add(connectTimeout))
