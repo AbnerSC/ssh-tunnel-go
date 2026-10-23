@@ -55,6 +55,7 @@ services:
 | `DIRECT_IP`      | `-direct-ip`     | 直连IP/网段（逗号或空格分隔多个值，可选）                                                      |
 | `DIRECT_DOMAIN`  | `-direct-domain` | 直连域名，匹配主域名（逗号或空格分隔，可选）                                                   |
 | `DIRECT_CN`      | `-direct-cn`     | 中国域名全量直连，取值 `true` 启用默认 `cn` 列表，也可直接写 geosite 名(如 `cn,private`，可选) |
+| `FORCE_DOMAIN`   | `-force-domain`  | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                             |
 | `JAVA_OPTS`      | -                | 覆盖镜像内置的 JVM 调优参数（可选）                                                            |
 
 ### 使用测试
@@ -76,4 +77,5 @@ curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
 - [X] 增加直连IP配置(支持IP和网段)，直连IP由本地直接访问，不经过远程SSH代理（`-direct-ip`，支持 CIDR 与点分掩码）
 - [X] 增加直连域名配置(支持匹配主域名)，直连域名由本地直接访问，不经过远程SSH代理（`-direct-domain`）
 - [X] 内置 geosite 数据(`dlc.dat`)，`-direct-cn` 一键中国域名全量直连(也可指定其它 geosite 列表)
+- [X] 强制走隧道域名配置(`-force-domain`)，用于抵消直连规则的误伤（如 `geosite:cn` 收录 `googleapis.cn` 导致 Google Play 更新失效）
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口

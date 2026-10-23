@@ -116,3 +116,76 @@ func TestAddGeoSite(t *testing.T) {
 		t.Fatal("google.com 不应命中 geosite:cn")
 	}
 }
+
+func TestForceDomainOverridesDirect(t *testing.T) {
+	// geosite:cn 收录了 googleapis.cn，会让 Play 的 services.googleapis.cn 直连
+	parsed, err := ParseDLC([]string{"cn"})
+	if err != nil {
+		t.Fatalf("ParseDLC 失败: %v", err)
+	}
+	r := New(nil, nil)
+	r.AddGeoSite(parsed["cn"])
+	if !r.IsDirect("services.googleapis.cn") {
+		t.Fatal("前置条件不成立: services.googleapis.cn 应被 geosite:cn 判定为直连")
+	}
+
+	r.SetForceDomains([]string{"googleapis.cn;google.cn,gstatic.cn"})
+	if got := r.ForceDomainCount(); got != 3 {
+		t.Fatalf("强制隧道域名数量 = %d, want 3", got)
+	}
+
+	// 命中的强制规则优先于 geosite 直连（含子域）
+	for _, host := range []string{
+		"services.googleapis.cn",
+		"googleapis.cn",
+		"www.google.cn",
+		"dl.google.cn",
+		"gstatic.cn",
+	} {
+		if r.IsDirect(host) {
+			t.Fatalf("%s 应被强制走隧道，不应直连", host)
+		}
+	}
+
+	// 不相关域名不受影响
+	for _, host := range []string{"www.baidu.com", "www.qq.com", "mmxx.fun"} {
+		if host == "mmxx.fun" {
+			continue
+		}
+		if !r.IsDirect(host) {
+			t.Fatalf("%s 应仍然直连", host)
+		}
+	}
+	if r.IsDirect("googleapis.com.evil.io") {
+		t.Fatal("后缀匹配不应跨越非主域边界")
+	}
+}
+
+func TestForceDomainOverridesExplicitDirect(t *testing.T) {
+	r := New(nil, []string{"example.com"})
+	if !r.IsDirect("a.example.com") {
+		t.Fatal("前置条件不成立: a.example.com 应直连")
+	}
+	r.SetForceDomains([]string{"a.example.com"})
+	if r.IsDirect("a.example.com") {
+		t.Fatal("强制规则应覆盖显式直连域名")
+	}
+	// 主域本身没有命中强制规则，仍然直连
+	if !r.IsDirect("example.com") {
+		t.Fatal("example.com 应仍然直连")
+	}
+}
+
+func TestForceDomainInvalidValuesIgnored(t *testing.T) {
+	r := New(nil, nil)
+	r.SetForceDomains([]string{"", "  ", "has/slash"})
+	if r.ForceDomainCount() != 0 {
+		t.Fatalf("非法值应被忽略: %d", r.ForceDomainCount())
+	}
+
+	var nilRules *Rules
+	nilRules.SetForceDomains([]string{"a.com"})
+	if nilRules.ForceDomainCount() != 0 {
+		t.Fatal("nil 规则不应记录强制域名")
+	}
+}

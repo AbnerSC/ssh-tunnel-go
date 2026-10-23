@@ -113,17 +113,21 @@ func Load(r *Resolver) (*Config, error) {
 	}
 
 	// 直连路由：-direct-ip 支持单 IP 与网段，-direct-domain 匹配主域名，
-	// -direct-cn 加载内置 geosite 列表（默认 cn）
+	// -direct-cn 加载内置 geosite 列表（默认 cn）；
+	// -force-domain 反向修正：命中的域名忽略一切直连规则，强制走 SSH 隧道
 	directIPs := r.Values("-direct-ip", "DIRECT_IP")
 	directDomains := r.Values("-direct-domain", "DIRECT_DOMAIN")
 	directSites := readGeoSiteNames(r)
-	if len(directIPs) > 0 || len(directDomains) > 0 || len(directSites) > 0 {
+	forceDomains := r.Values("-force-domain", "FORCE_DOMAIN")
+	if len(directIPs) > 0 || len(directDomains) > 0 || len(directSites) > 0 || len(forceDomains) > 0 {
 		cfg.Direct = direct.New(directIPs, directDomains)
+		cfg.Direct.SetForceDomains(forceDomains)
 		if len(directSites) > 0 {
 			loadGeoSite(cfg.Direct, directSites)
 		}
 		logging.Info("config", "直连规则已加载",
-			"ipRules", cfg.Direct.IPRuleCount(), "domainRules", cfg.Direct.DomainRuleCount())
+			"ipRules", cfg.Direct.IPRuleCount(), "domainRules", cfg.Direct.DomainRuleCount(),
+			"forceDomains", cfg.Direct.ForceDomainCount())
 	}
 
 	// 需要 SSH 能力时，缺省信息从控制台补齐（非终端环境不阻塞）

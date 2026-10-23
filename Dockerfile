@@ -99,6 +99,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 #   DIRECT_IP      -> -direct-ip     直连 IP/网段
 #   DIRECT_DOMAIN  -> -direct-domain 直连域名（主域匹配）
 #   DIRECT_CN      -> -direct-cn     中国域名全量直连（geosite:cn）
+#   FORCE_DOMAIN   -> -force-domain   强制走隧道的域名，优先于直连规则
 #   LOG_FORMAT     -> json（默认）/ text（Java 版同构文本格式）
 #   LOG_LEVEL      -> debug / info（默认）/ warn / error
 #   JAVA_OPTS      -> Java 版遗留变量，Go 版接受但忽略
@@ -113,6 +114,7 @@ ENV SOCKS_PORT= \
     DIRECT_IP= \
     DIRECT_DOMAIN= \
     DIRECT_CN= \
+    FORCE_DOMAIN= \
     LOG_FORMAT= \
     LOG_LEVEL= \
     JAVA_OPTS=

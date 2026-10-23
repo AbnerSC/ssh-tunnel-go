@@ -22,6 +22,8 @@ type Rules struct {
 	full     map[string]struct{} // 完整匹配
 	keywords []string
 	regexps  []*regexp.Regexp
+	// force 强制走隧道的主域（含子域），优先级高于上面全部直连规则
+	force map[string]struct{}
 }
 
 // New 根据直连 IP 与域名配置构建规则；单个值内可用逗号/分号/空白分隔多个规则。
@@ -30,6 +32,7 @@ func New(directIPs, directDomains []string) *Rules {
 		ips:     make(map[netip.Addr]struct{}),
 		domains: make(map[string]struct{}),
 		full:    make(map[string]struct{}),
+		force:   make(map[string]struct{}),
 	}
 	for _, item := range directIPs {
 		for _, part := range splitMulti(item) {
@@ -66,8 +69,14 @@ func (r *Rules) IsDirect(host string) bool {
 		return false
 	}
 
-	// 域名匹配，按成本从低到高：full 精确 → 主域 → 关键字 → 正则
+	// 域名匹配，按成本从低到高：强制走隧道 → full 精确 → 主域 → 关键字 → 正则
 	lower := stripTailDot(strings.ToLower(str))
+	// 强制走隧道优先：国内域名列表常收进国际服务的 .cn 镜像域名
+	// （如 geosite:cn 含 googleapis.cn），命中后会把 Play 的
+	// services.googleapis.cn 拉到本地直连，下载链路随之失效
+	if r.isForce(lower) {
+		return false
+	}
 	if _, ok := r.full[lower]; ok {
 		return true
 	}
@@ -104,7 +113,60 @@ func (r *Rules) Empty() bool {
 		return true
 	}
 	return len(r.ips) == 0 && len(r.prefixes) == 0 && len(r.domains) == 0 &&
-		len(r.full) == 0 && len(r.keywords) == 0 && len(r.regexps) == 0
+		len(r.full) == 0 && len(r.keywords) == 0 && len(r.regexps) == 0 && len(r.force) == 0
+}
+
+// SetForceDomains 设置强制走隧道的域名（主域匹配，含子域）。
+//
+// 用于抵消直连规则的误伤：-direct-cn 内置的 geosite:cn 会命中
+// googleapis.cn / google.cn / gstatic.cn 等 Google 中国域名，
+// 这些域名一旦直连，Google Play 的更新下载会指向国内不可用的地址。
+func (r *Rules) SetForceDomains(values []string) {
+	if r == nil {
+		return
+	}
+	if r.force == nil {
+		r.force = make(map[string]struct{})
+	}
+	for _, item := range values {
+		for _, part := range splitMulti(item) {
+			lower := stripTailDot(strings.ToLower(stripQuote(part)))
+			if lower == "" || strings.ContainsRune(lower, '/') {
+				logging.Warn("direct", "忽略非法强制隧道域名", "value", part)
+				continue
+			}
+			r.force[lower] = struct{}{}
+		}
+	}
+}
+
+// ForceDomainCount 强制走隧道的域名数量。
+func (r *Rules) ForceDomainCount() int {
+	if r == nil {
+		return 0
+	}
+	return len(r.force)
+}
+
+// isForce 判断域名是否命中强制走隧道规则（主域后缀匹配）。
+func (r *Rules) isForce(name string) bool {
+	if len(r.force) == 0 {
+		return false
+	}
+	if _, ok := r.force[name]; ok {
+		return true
+	}
+	suffix := name
+	for {
+		idx := strings.IndexByte(suffix, '.')
+		if idx < 0 {
+			return false
+		}
+		suffix = suffix[idx+1:]
+		if _, ok := r.force[suffix]; ok {
+			return true
+		}
+	}
 }
 
 // IPRuleCount IP 规则数量（含网段）。
