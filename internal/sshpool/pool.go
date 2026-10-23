@@ -245,10 +245,12 @@ func (p *Pool) connect(ctx context.Context, idx int) (*conn, error) {
 	if tcp, ok := raw.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 		// 刻意不调用 SetReadBuffer/SetWriteBuffer：
-		// 显式设置 SO_RCVBUF/SO_SNDBUF 会让内核置上 SOCK_RCVBUF_LOCK，
-		// 关闭接收窗口自动调优(tcp_moderate_rcvbuf)。实测公网高 RTT 链路下
-		// 窗口会被钉在 64~128KB，单向吞吐被压到约 1MB/s(约 100KB/RTT)，
-		// 而交给内核自动调优可随 BDP 增长到几 MB，吞吐提升一个数量级。
+		// 显式设置 SO_RCVBUF/SO_SNDBUF 会让内核置上 SOCK_RCVBUF_LOCK/SOCK_SNDBUF_LOCK，
+		// 关闭收发缓冲的自动调优(tcp_moderate_rcvbuf)。实测公网 78ms RTT 链路下，
+		// 请求值被 net.core.rmem_max 截断且不再增长：接收窗口钉在 64~128KB、
+		// 发送队列卡在约 208KB，下载仅 0.8MB/s、上传仅 3MB/s；
+		// 交给内核自动调优后可随 BDP 涨到 2.5~6MB，下载 16~20MB/s、上传 9~11MB/s，
+		// 两者都已与同链路裸 TCP 吞吐持平。
 	}
 	// 握手与认证共用同一超时，防止 auth 阶段无限阻塞
 	_ = raw.SetDeadline(time.Now().Add(connectTimeout))

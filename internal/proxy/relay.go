@@ -6,6 +6,10 @@ import (
 	"sync"
 )
 
+// relayBufSize 单向转发缓冲大小。SSH 通道单包上限 32KB，取 4 倍可减少
+// 读系统调用与写入调度次数；实测仍受对端通道窗口限制，此处只降低本地开销。
+const relayBufSize = 128 * 1024
+
 // Relay 在两条连接之间做双向转发。
 //
 // 正常 EOF 时只做半关闭（CloseWrite），保留反向数据通道——上传结束不代表下载结束；
@@ -21,9 +25,24 @@ func Relay(a, b net.Conn) {
 
 	pipe := func(dst, src net.Conn, done chan<- struct{}) {
 		defer func() { done <- struct{}{} }()
-		if _, err := io.Copy(dst, src); err != nil {
-			closeBoth()
-			return
+		// 不用 io.Copy：其内部缓冲固定 32KB，且目标为 *net.TCPConn 时会走
+		// ReadFrom 而忽略自定义缓冲，导致包装后的 SSH 通道侧始终是小块读写。
+		buf := make([]byte, relayBufSize)
+		for {
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					closeBoth()
+					return
+				}
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
+					closeBoth()
+					return
+				}
+				break
+			}
 		}
 		closeWrite(dst)
 	}
