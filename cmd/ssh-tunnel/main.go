@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-	_ "time/tzdata" // 内嵌时区数据库：alpine 镜像默认不带 tzdata，TZ=Asia/Shanghai 仍可生效
+	_ "time/tzdata" // 内嵌时区数据库：精简基础镜像不带 tzdata，TZ=Asia/Shanghai 仍可生效
 
 	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/config"
 	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
@@ -78,7 +78,7 @@ func handleOneShot(args []string) (int, bool) {
 // health 存活探测：尝试连接本地代理端口。
 //
 // 与 Java 版 HEALTHCHECK 等价（优先 HTTP_PORT，其次 SOCKS_PORT；都未配置时恒健康），
-// 但不依赖 bash 的 /dev/tcp，因此 alpine 镜像无需额外装 shell 工具。
+// 但不依赖 bash 的 /dev/tcp，因此镜像无需额外安装 shell 工具。
 // 已配置但取值非法或端口不可用时判定不健康，不静默回退到另一个端口，
 // 避免掩盖配置错误。
 func health(args []string) int {

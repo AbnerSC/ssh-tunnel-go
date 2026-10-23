@@ -154,7 +154,7 @@ IP 字面量目标只参与 IP 规则匹配，不做反向域名匹配（与 Jav
 | `LOG_FORMAT` | - | `json`（默认）或 `text`（Java 版同构文本格式） |
 | `LOG_LEVEL` | - | `debug` / `info`（默认） / `warn` / `error` |
 | `JAVA_OPTS` | - | Java 版遗留变量，Go 版接受但忽略（compose 无需删除） |
-| `TZ` | - | 时区；二进制已内嵌 `time/tzdata`，alpine 基础镜像同样生效 |
+| `TZ` | - | 时区；二进制已内嵌 `time/tzdata`，精简基础镜像（debian-slim / alpine）同样生效 |
 
 ### 日志
 
@@ -218,7 +218,7 @@ go test ./... -race -count=1
 
 ### Docker 镜像构建
 
-多阶段构建：`golang:1.27-alpine` 交叉编译静态二进制，运行阶段为 `alpine:3.22`。
+多阶段构建：`golang:1.27-bookworm` 交叉编译静态二进制，运行阶段为 `debian:bookworm-slim`（仅装 CA 证书）。
 
 ```bash
 # 单架构
@@ -227,8 +227,11 @@ docker build -t ssh-tunnel:dev .
 # 多架构
 docker buildx build --platform linux/amd64,linux/arm64 -t ssh-tunnel:dev .
 
-# 国内环境加速 Go 依赖
-docker build --build-arg GOPROXY=https://goproxy.cn,direct -t ssh-tunnel:dev .
+# 国内环境加速 Go 依赖与 apt 安装
+docker build \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --build-arg APT_MIRROR=repo.huaweicloud.com \
+  -t ssh-tunnel:dev .
 ```
 
 注入版本信息：
@@ -263,7 +266,7 @@ GitHub 侧需要配置 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`。
 | 并发模型 | 事件循环 + 虚拟线程 | goroutine + 阻塞 IO |
 | 日志格式 | logback 文本 | 默认 JSON，`LOG_FORMAT=text` 可切回文本 |
 | 健康检查 | 依赖 `bash` 的 `/dev/tcp` | 二进制内置 `-health` |
-| 基础镜像 | `eclipse-temurin:25-jdk-noble` | `alpine:3.22` |
+| 基础镜像 | `eclipse-temurin:25-jdk-noble` | `debian:bookworm-slim` |
 | `JAVA_OPTS` | 调整 JVM 参数 | 接受但忽略 |
 
 行为上刻意保持一致的细节：

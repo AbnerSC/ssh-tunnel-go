@@ -19,7 +19,8 @@
 #                        nexus.example.com:8082 或 nexus.example.com/repository/docker-releases）
 #       NEXUS_USERNAME   Nexus 账号
 #       NEXUS_PASSWORD   Nexus 密码
-#   - 已注册可用的 act_runner（默认使用 jdk25 标签，可按实际标签修改 runs-on）
+#   - 已注册可用的 act_runner（标签 golang，与 NexHomeGo 使用同一个 Go runner，
+#     可按实际标签修改 runs-on）
 # =====================================================================
 name: Docker 镜像构建（Nexus）
 
@@ -36,8 +37,12 @@ permissions:
 
 env:
   IMAGE_NAME: ssh-tunnel
-  # 自托管 runner 多在国内，注入 Go 模块代理加速依赖下载（置空可关闭）
-  GOPROXY: https://goproxy.cn,direct
+  # 自托管 runner 多在国内，注入 Go 模块代理加速依赖下载
+  # （Dockerfile 中该 ARG 默认为空，仅由本工作流注入；GitHub 侧走官方 proxy.golang.org）
+  GOPROXY: https://repo.pi.mmxx.fun/repository/go-public,direct
+  # 运行阶段安装 ca-certificates 时经公共镜像源加速
+  # （GitHub 侧不注入，直接使用官方 deb.debian.org）
+  APT_MIRROR: repo.huaweicloud.com
   # buildkit（docker-container driver）拉取镜像不走 docker daemon 的 registry-mirrors，
   # 基础镜像需显式经 Nexus 的 docker 代理仓库拉取，避免 runner 直连 docker.io 超时
   DOCKER_PROXY: repo.pi.mmxx.fun/docker-public
@@ -45,7 +50,8 @@ env:
 jobs:
   build-and-push:
     name: 构建并推送镜像到 Nexus
-    runs-on: jdk25
+    # 与 NexHomeGo 用同一个 Go runner；任务只调用 docker CLI，编译在构建容器内完成
+    runs-on: golang
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -133,8 +139,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GOPROXY=${{ env.GOPROXY }}
-            GO_IMAGE=${{ env.DOCKER_PROXY }}/library/golang:1.27-alpine
-            BASE_IMAGE=${{ env.DOCKER_PROXY }}/library/alpine:3.22
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            GO_IMAGE=${{ env.DOCKER_PROXY }}/library/golang:1.27-bookworm
+            BASE_IMAGE=${{ env.DOCKER_PROXY }}/library/debian:bookworm-slim
             VERSION=${{ steps.version.outputs.version != '' && steps.version.outputs.version || 'latest' }}
             COMMIT=${{ steps.buildinfo.outputs.commit }}
             BUILD_DATE=${{ steps.buildinfo.outputs.date }}

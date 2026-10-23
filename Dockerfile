@@ -4,7 +4,7 @@
 # 多阶段构建：
 #   - 编译阶段固定在构建机原生架构（--platform=$BUILDPLATFORM），
 #     通过 GOOS/GOARCH 交叉编译出目标架构的静态二进制，无需 QEMU 模拟
-#   - 运行阶段基于 alpine（官方多架构镜像），仅拷贝静态二进制
+#   - 运行阶段基于 debian bookworm-slim（官方多架构镜像），仅拷贝静态二进制
 #
 # 与 Java 版镜像的兼容性：
 #   - 环境变量 SOCKS_PORT / HTTP_PORT / SOCKS_USER / SOCKS_PASSWORD /
@@ -16,24 +16,34 @@
 # 本地手动构建多架构镜像：
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t ssh-tunnel:latest --push .
-# 国内环境可注入 Go 模块代理加速依赖下载：
+# 模块代理默认不注入（GitHub Actions / 本地直连 Go 官方 proxy.golang.org）；
+# 国内环境构建（Gitea Actions）显式注入加速依赖下载：
 #   --build-arg GOPROXY=https://goproxy.cn,direct
+# 同样可选的 apt 镜像源（加速运行阶段 ca-certificates 安装）：
+#   --build-arg APT_MIRROR=repo.huaweicloud.com
 # =====================================================================
 
 # 运行时基础镜像：必须声明在第一个 FROM 之前（全局 ARG），否则后续 FROM 无法引用
 ARG GO_IMAGE=golang:1.27-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
+# 可选：Debian apt 镜像源（仅运行阶段安装 ca-certificates 时生效）。
+# 默认不注入，保持官方 deb.debian.org；国内环境由 Gitea Actions 经 build-arg
+# 注入公共镜像源加速，为空时运行阶段跳过替换
+ARG APT_MIRROR=
 
 # ---------- 阶段一：编译 ----------
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 WORKDIR /build
 
-ARG GOPROXY=https://goproxy.cn,direct
+# 可选：模块代理默认不注入，保持 Go 官方默认行为（proxy.golang.org + direct），
+# 供 GitHub Actions / 本地直接构建；国内环境由 Gitea Actions 通过 build-arg 注入
+ARG GOPROXY
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
-ENV GOPROXY=${GOPROXY} \
-    CGO_ENABLED=0
+ENV CGO_ENABLED=0
+# 仅在显式传入时才写入 go env（持久化到后续构建步骤），未传时完全不改动默认代理
+RUN if [ -n "$GOPROXY" ]; then go env -w GOPROXY="$GOPROXY"; fi
 
 # 先拷依赖清单预取模块，源码变更时可复用 Docker 层缓存
 COPY go.mod go.sum ./
@@ -53,8 +63,18 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 FROM ${BASE_IMAGE}
 WORKDIR /app
 
+ARG APT_MIRROR
+
 # 静态二进制不依赖 libc；ca-certificates 供直连目标时按系统证书校验（如有）
-RUN apk add --no-cache ca-certificates
+# 动态替换镜像源（兼容 DEB822 格式与旧版 sources.list 格式；APT_MIRROR 为空则保持官方源）
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+        sed -i "s|security.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/ssh-tunnel /app/ssh-tunnel
 
