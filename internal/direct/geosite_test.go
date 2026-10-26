@@ -17,7 +17,7 @@ func TestParseEmbeddedCN(t *testing.T) {
 	}
 	t.Logf("cn 规则总数=%d domain=%d full=%d regexp=%d keyword=%d",
 		len(rules), counts[TypeDomain], counts[TypeFull], counts[TypeRegexp], counts[TypeKeyword])
-	if len(rules) != 6624 {
-		t.Fatalf("cn 规则数量应为 6624, got %d", len(rules))
+	if len(rules) != 6639 {
+		t.Fatalf("cn 规则数量应为 6639, got %d", len(rules))
 	}
 }

@@ -105,8 +105,8 @@ func TestAddGeoSite(t *testing.T) {
 	}
 	r := New(nil, nil)
 	r.AddGeoSite(parsed["cn"])
-	// 6624 条全部生效（含 3 条 RE2 兼容正则），说明没有规则被丢弃
-	if got := r.DomainRuleCount(); got != 6624 {
+	// 6639 条全部生效（含 3 条 RE2 兼容正则），说明没有规则被丢弃
+	if got := r.DomainRuleCount(); got != 6639 {
 		t.Fatalf("geosite 规则应全部生效: %d", got)
 	}
 	if !r.IsDirect("www.baidu.com") || !r.IsDirect("baidu.com") {
