@@ -9,7 +9,7 @@
 ### Go 1.27.3
 
 ### 依赖
-- [domain-list-community](https://github.com/v2fly/domain-list-community.git) 20261015074526
+- [domain-list-community](https://github.com/v2fly/domain-list-community.git) 
 
 ### Docker 运行
 ```yaml
