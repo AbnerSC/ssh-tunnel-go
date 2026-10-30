@@ -40,13 +40,13 @@ env:
   IMAGE_NAME: ssh-tunnel
   # 自托管 runner 多在国内，注入 Go 模块代理加速依赖下载
   # （Dockerfile 中该 ARG 默认为空，仅由本工作流注入；GitHub 侧走官方 proxy.golang.org）
-  GOPROXY: https://repo.pi.mmxx.fun/repository/go-public,direct
+  GOPROXY: ${{ vars.GOPROXY_URL }}
   # 运行阶段安装 ca-certificates / curl 时经公共镜像源加速
   # （GitHub 侧不注入，直接使用官方 deb.debian.org）
   APT_MIRROR: repo.huaweicloud.com
   # buildkit（docker-container driver）拉取镜像不走 docker daemon 的 registry-mirrors，
   # 基础镜像需显式经 Nexus 的 docker 代理仓库拉取，避免 runner 直连 docker.io 超时
-  DOCKER_PROXY: repo.pi.mmxx.fun/docker-public
+  DOCKER_PROXY: ${{ vars.DOCKER_PROXY }}
 
 jobs:
   build-and-push:
