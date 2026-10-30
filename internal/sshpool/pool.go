@@ -11,9 +11,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/config"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/proxy"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
 )
 
 const (
@@ -53,8 +53,9 @@ var cipherList = []string{
 
 // Pool SSH 连接池：维持 N 条会话，按轮询分发 direct-tcpip 通道。
 type Pool struct {
-	cfg   *config.SSHConfig
-	local proxy.LocalDialer
+	cfg      *config.SSHConfig
+	local    proxy.LocalDialer
+	hostKeys *hostKeyStore
 
 	slots []atomic.Pointer[conn]
 	main  atomic.Pointer[conn]
@@ -77,9 +78,10 @@ func New(cfg *config.SSHConfig) *Pool {
 		size = 1
 	}
 	return &Pool{
-		cfg:   cfg,
-		local: proxy.LocalDialer{Timeout: 3 * time.Second},
-		slots: make([]atomic.Pointer[conn], size),
+		cfg:      cfg,
+		local:    proxy.LocalDialer{Timeout: 3 * time.Second},
+		slots:    make([]atomic.Pointer[conn], size),
+		hostKeys: newHostKeyStore(cfg.KnownHosts, cfg.HostKeys),
 	}
 }
 
@@ -246,8 +248,9 @@ func (p *Pool) connect(ctx context.Context, idx int) (*conn, error) {
 				return answers, nil
 			}),
 		},
-		// 对应原 JSch StrictHostKeyChecking=no
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		// 服务端主机密钥校验：默认首次信任(TOFU)，可用 SSH_HOST_KEY 固定指纹。
+		// 不校验等于把 SSH 密码和全部隧道流量交给链路上的任何中间人。
+		HostKeyCallback: p.hostKeys.callback(),
 		Ciphers:         cipherList,
 	}
 	dialer := net.Dialer{Timeout: connectTimeout, KeepAlive: keepAliveInterval}

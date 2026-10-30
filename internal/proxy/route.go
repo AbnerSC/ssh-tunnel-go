@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/direct"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/direct"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 // Credentials 代理账号密码，socks5 与 http 代理共用。
@@ -15,11 +15,19 @@ type Credentials struct {
 	User     string
 	Password string
 	Enabled  bool
+	// guard 认证失败限速；nil 表示不限制（仅供内部调用与测试）
+	guard *authGuard
 }
 
 // NewCredentials 两个字段都非空时启用认证（与 Java 版一致）。
+// 同时创建失败限速器，挡住弱口令爆破。
 func NewCredentials(user, password string) Credentials {
-	return Credentials{User: user, Password: password, Enabled: user != "" && password != ""}
+	return Credentials{
+		User:     user,
+		Password: password,
+		Enabled:  user != "" && password != "",
+		guard:    newAuthGuard(),
+	}
 }
 
 // Dialer 建立到目标地址的连接。

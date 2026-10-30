@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/config"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
 )
 
 // testSSHServer 进程内最小 sshd：支持密码认证、direct-tcpip 与 tcpip-forward。
@@ -278,6 +279,15 @@ func waitForTimeout(t *testing.T, what string, timeout time.Duration, cond func(
 	t.Fatalf("等待超时: %s", what)
 }
 
+// withTempKnownHosts 让每个用例使用独立的 known_hosts。
+// 默认路径是工作目录下的 known_hosts，直接跑测试会把它写进源码目录；
+// 且每次用例的主机密钥都是新生成的，复用上次的记录会让后续运行误判为密钥变更。
+func withTempKnownHosts(t *testing.T, cfg *config.SSHConfig) *config.SSHConfig {
+	t.Helper()
+	cfg.KnownHosts = filepath.Join(t.TempDir(), "known_hosts")
+	return cfg
+}
+
 func startPool(t *testing.T, cfg *config.SSHConfig) (*Pool, context.CancelFunc) {
 	t.Helper()
 	pool := New(cfg)
@@ -309,9 +319,9 @@ func TestPoolTunnel(t *testing.T) {
 	srv := newTestSSHServer(t, "root", "secret")
 	echoHost, echoPort := startEcho(t)
 
-	pool, _ := startPool(t, &config.SSHConfig{
+	pool, _ := startPool(t, withTempKnownHosts(t, &config.SSHConfig{
 		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "secret", Pool: 2,
-	})
+	}))
 
 	conn, err := pool.DialContext(context.Background(), echoHost, echoPort)
 	if err != nil {
@@ -333,10 +343,10 @@ func TestPoolLocalForward(t *testing.T) {
 	echoHost, echoPort := startEcho(t)
 	localPort := freePort(t)
 
-	startPool(t, &config.SSHConfig{
+	startPool(t, withTempKnownHosts(t, &config.SSHConfig{
 		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "secret", Pool: 1,
 		Locals: []config.CopyItem{{Host: echoHost, Port: echoPort, TargetPort: localPort}},
-	})
+	}))
 
 	var conn net.Conn
 	waitFor(t, "本地转发可用", func() bool {
@@ -356,10 +366,10 @@ func TestPoolRemoteForward(t *testing.T) {
 	echoHost, echoPort := startEcho(t)
 	remotePort := freePort(t)
 
-	startPool(t, &config.SSHConfig{
+	startPool(t, withTempKnownHosts(t, &config.SSHConfig{
 		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "secret", Pool: 1,
 		Remotes: []config.CopyItem{{Host: echoHost, Port: echoPort, TargetPort: remotePort}},
-	})
+	}))
 
 	waitFor(t, "服务器侧远程转发监听", func() bool { return srv.hasForward(remotePort) })
 
@@ -374,9 +384,9 @@ func TestPoolRemoteForward(t *testing.T) {
 
 func TestPoolAuthFailureKeepsRetrying(t *testing.T) {
 	srv := newTestSSHServer(t, "root", "secret")
-	pool := New(&config.SSHConfig{
+	pool := New(withTempKnownHosts(t, &config.SSHConfig{
 		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "wrong", Pool: 1,
-	})
+	}))
 	ctx, cancel := context.WithCancel(context.Background())
 	pool.Start(ctx)
 	defer func() {
@@ -395,9 +405,9 @@ func TestPoolReconnectAfterServerRestart(t *testing.T) {
 	echoHost, echoPort := startEcho(t)
 	port := srv.port()
 
-	pool, _ := startPool(t, &config.SSHConfig{
+	pool, _ := startPool(t, withTempKnownHosts(t, &config.SSHConfig{
 		Addr: "127.0.0.1", Port: port, User: "root", Password: "secret", Pool: 1,
-	})
+	}))
 	first := pool.pick()
 	if first == nil {
 		t.Fatal("首个会话未建立")

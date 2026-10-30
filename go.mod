@@ -1,4 +1,4 @@
-module git.edge.05200809.xyz/dengming/ssh-tunnel-go
+module git.pi.mmxx.fun/dengming/ssh-tunnel-go
 
 go 1.27.3
 

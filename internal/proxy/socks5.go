@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 const (
@@ -65,6 +65,11 @@ func handleSocks5(conn net.Conn, creds Credentials, route *Route) {
 		if !hasMethod(methods, 0x02) {
 			// 客户端不支持账号密码认证，拒绝
 			_ = writeAll(conn, []byte{5, 0xFF})
+			return
+		}
+		if creds.guard.Blocked(remote) {
+			// 处于封禁期：不回认证流程，直接断开，避免继续提供猜测机会
+			logging.Warn("socks5", "来源处于认证封禁期，已拒绝", "remote", remote)
 			return
 		}
 		if err := writeAll(conn, []byte{5, 0x02}); err != nil {
@@ -147,11 +152,13 @@ func authSocks5(conn net.Conn, creds Credentials, remote net.Addr) bool {
 		return false
 	}
 	logging.Debug("socks5", "收到认证账号", "user", string(user), "remote", remote)
-	if string(user) != creds.User || string(pass) != creds.Password {
-		logging.Warn("socks5", "代理认证不通过", "user", string(user), "remote", remote)
+	if !credentialMatch(string(user), string(pass), creds.User, creds.Password) {
+		banned := creds.guard.Fail(remote)
+		logging.Warn("socks5", "代理认证不通过", "user", string(user), "remote", remote, "banned", banned)
 		_ = writeAll(conn, []byte{1, 1})
 		return false
 	}
+	creds.guard.Reset(remote)
 	logging.Debug("socks5", "代理认证通过", "user", string(user), "remote", remote)
 	return writeAll(conn, []byte{1, 0}) == nil
 }

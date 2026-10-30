@@ -278,6 +278,9 @@ func TestHTTPForwardRewrite(t *testing.T) {
 		"Host: 127.0.0.1\r\n" +
 		"Proxy-Connection: keep-alive\r\n" +
 		"Connection: keep-alive\r\n" +
+		"Keep-Alive: timeout=5\r\n" +
+		"X-Forwarded-For: 6.6.6.6\r\n" +
+		"X-Real-IP: 6.6.6.6\r\n" +
 		"X-Test: 1\r\n\r\nabc"
 	writeConn(t, conn, []byte(req))
 
@@ -291,7 +294,10 @@ func TestHTTPForwardRewrite(t *testing.T) {
 
 	select {
 	case head := <-received:
-		want := "POST /path?q=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Test: 1\r\nConnection: close\r\n\r\nabc"
+		// 逐跳头（Proxy-Connection/Connection/Keep-Alive）与可伪造来源的身份头
+		// （X-Forwarded-For/X-Real-IP）被剔除，Host 改写为 URI 指定的目标
+		want := "POST /path?q=1 HTTP/1.1\r\nX-Test: 1\r\nHost: 127.0.0.1:" +
+			fmt.Sprint(targetPort) + "\r\nConnection: close\r\n\r\nabc"
 		if head != want {
 			t.Fatalf("改写后的请求不一致:\n got %q\nwant %q", head, want)
 		}
@@ -416,6 +422,134 @@ func TestParseHostPort(t *testing.T) {
 			t.Fatalf("parseHostPort(%q) = (%q,%d,%v), want (%q,%d,%v)",
 				c.in, host, port, ok, c.wantHost, c.wantPort, c.wantOK)
 		}
+	}
+}
+
+// TestHTTPForwardRejectsTECL 同时带 Transfer-Encoding 与 Content-Length 时直接拒绝。
+//
+// 两个字段共存是请求走私的原语：代理与源站若取不同字段切分消息边界，
+// 后面的字节会被当成下一个请求处理。
+func TestHTTPForwardRejectsTECL(t *testing.T) {
+	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+	req := "POST http://127.0.0.1:1/ HTTP/1.1\r\n" +
+		"Host: 127.0.0.1\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Content-Length: 6\r\n\r\n0\r\n\r\n"
+	writeConn(t, conn, []byte(req))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("TE+CL 同时出现应返回 400: %q", head)
+	}
+}
+
+// TestHTTPForwardRejectsUserInfoHost URI 中带 user@host 时拒绝。
+//
+// 否则 hostPortStr 会把 "user@host" 整段当成主机名，既可能被解析成
+// 与实际连接目标不一致的主机，也让 Host 改写失去意义。
+func TestHTTPForwardRejectsUserInfoHost(t *testing.T) {
+	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+	writeConn(t, conn, []byte("GET http://user@127.0.0.1:1/ HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("含 userinfo 的 URI 应返回 400: %q", head)
+	}
+}
+
+// TestHTTPAuthBansAfterRepeatedFailures 同一来源连续失败达阀值后必须断开连接。
+//
+// 旧实现每次 407 后都不断开也不限速，单条 TCP 连接上实测可达约 290 次/秒，
+// 弱口令必然被猜中。
+func TestHTTPAuthBansAfterRepeatedFailures(t *testing.T) {
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+
+	bad := "CONNECT 127.0.0.1:1 HTTP/1.1\r\nProxy-Authorization: " +
+		basicAuth("user", "wrong") + "\r\n\r\n"
+	for i := 0; i < authFailLimit; i++ {
+		writeConn(t, conn, []byte(bad))
+		if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+			t.Fatalf("第 %d 次失败应返回 407: %q", i+1, head)
+		}
+	}
+
+	// 达到阀值后连接应被关闭，无法继续在同一个连接上爆破
+	writeConn(t, conn, []byte(bad))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("达到失败阀值后应断开连接")
+	}
+}
+
+// TestAuthGuardBansAndResets 限速器的计数与清除行为。
+func TestAuthGuardBansAndResets(t *testing.T) {
+	guard := newAuthGuard()
+	remote := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
+	for i := 0; i < authFailLimit-1; i++ {
+		if guard.Fail(remote) {
+			t.Fatalf("第 %d 次不应封禁", i+1)
+		}
+	}
+	if !guard.Fail(remote) {
+		t.Fatal("达到阀值应封禁")
+	}
+	if !guard.Blocked(remote) {
+		t.Fatal("封禁期内应返回 Blocked")
+	}
+	// 其他来源不受影响
+	if guard.Blocked(&net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 1234}) {
+		t.Fatal("不应影响其他来源")
+	}
+	guard.Reset(remote)
+	if guard.Blocked(remote) {
+		t.Fatal("重置后应解除封禁")
+	}
+}
+
+// TestCredentialMatch 常量时间比较的正确性（长度不等也必须安全返回 false）。
+func TestCredentialMatch(t *testing.T) {
+	if !credentialMatch("u", "p", "u", "p") {
+		t.Fatal("相同凭据应匹配")
+	}
+	for _, tc := range [][4]string{
+		{"u", "p", "u", "p2"},
+		{"u", "p", "u2", "p"},
+		{"", "p", "u", "p"},
+		{"u", "p", "", ""},
+		{"user", "pwd", "user", "pw"},
+	} {
+		if credentialMatch(tc[0], tc[1], tc[2], tc[3]) {
+			t.Fatalf("不应匹配: %+v", tc)
+		}
+	}
+}
+
+// TestHTTPBannedSourceRejectedBeforeParsing 封禁期内不解析任何请求，直接 407 断开。
+//
+// 仅在认证失败分支检查封禁是不够的：封禁期内携带正确凭据依旧能通过，
+// 每条新连接也仍能再试一次，爆破速率等于没被限制。
+func TestHTTPBannedSourceRejectedBeforeParsing(t *testing.T) {
+	creds := NewCredentials("user", "pwd123")
+	client, server := net.Pipe()
+	defer client.Close()
+
+	// 把该来源直接打入封禁期，模拟连续失败达到阀值后的状态
+	for i := 0; i < authFailLimit; i++ {
+		creds.guard.Fail(client.RemoteAddr())
+	}
+	if !creds.guard.Blocked(client.RemoteAddr()) {
+		t.Fatal("前置条件失败：来源应处于封禁期")
+	}
+
+	go func() {
+		defer server.Close()
+		handleHTTP(server, creds, directRoute("http"))
+	}()
+
+	// 不发送任何请求，封禁来源也应立即收到 407
+	br := bufio.NewReader(client)
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+		t.Fatalf("封禁来源应直接收到 407: %q", head)
 	}
 }
 

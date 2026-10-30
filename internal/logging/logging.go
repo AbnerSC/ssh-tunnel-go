@@ -127,6 +127,49 @@ func withComponent(component string, kv []any) []any {
 	return append(args, kv...)
 }
 
+// sanitizeMaxLen 单个字段值的最大输出长度，避免超长输入把日志放大。
+const sanitizeMaxLen = 512
+
+// sanitizeValue 清洗写入文本日志的字段值。
+//
+// 文本格式是逐字段拼接的，客户端完全可控的内容（认证用户名、目标主机名、
+// 请求路径）如果带换行符，就能向日志里注入伪造的整行记录
+// （实测可注入一条「管理员登录成功」）误导审计与告警。
+// 这里把控制字符转义成可见形式，并截断过长内容。
+func sanitizeValue(s string) string {
+	truncated := false
+	if len(s) > sanitizeMaxLen {
+		s, truncated = s[:sanitizeMaxLen], true
+	}
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		if truncated {
+			return s + "...(truncated)"
+		}
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString("\\n")
+		case r == '\r':
+			b.WriteString("\\r")
+		case r == '\t':
+			b.WriteString("\\t")
+		case r < 0x20 || r == 0x7f:
+			b.WriteString("\\x")
+			b.WriteString(fmt.Sprintf("%02x", r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if truncated {
+		b.WriteString("...(truncated)")
+	}
+	return b.String()
+}
+
 // textHandler 复刻 Java 版 logback 的行格式：
 //
 //	2026-10-23 12:00:00.123 [组件] INFO  org.open.scdm.common.ssh.Logf - 消息
@@ -182,7 +225,7 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 		b.WriteString(" ")
 		b.WriteString(a.Key)
 		b.WriteString("=")
-		b.WriteString(a.Value.String())
+		b.WriteString(sanitizeValue(a.Value.String()))
 	}
 	b.WriteString("\n")
 

@@ -10,9 +10,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/config"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/proxy"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
 )
 
 // remoteBindHost -R 转发在服务器侧的绑定地址，与 Java 版 localhost 语义一致（仅监听回环）
@@ -120,14 +120,17 @@ func (c *conn) acceptRemote(ln net.Listener, item config.CopyItem) {
 }
 
 // startLocals 建立全部 -L 本地监听。
+//
+// 监听地址跟随 BIND_ADDR：默认全部网卡（与旧行为一致），
+// 但本地转发端口没有任何认证，不希望被别的机器访问时应设为 127.0.0.1。
 func (p *Pool) startLocals() {
 	for _, item := range p.cfg.Locals {
-		ln, err := net.Listen("tcp", ":"+strconv.Itoa(item.TargetPort))
+		ln, err := net.Listen("tcp", net.JoinHostPort(p.cfg.BindAddr, strconv.Itoa(item.TargetPort)))
 		if err != nil {
-			logging.Warn("ssh", "本地转发监听失败", "port", item.TargetPort, "err", err)
+			logging.Warn("ssh", "本地转发监听失败", "port", item.TargetPort, "bind", p.cfg.BindAddr, "err", err)
 			continue
 		}
-		logging.Info("ssh", "本地转发端口监听成功", "port", item.TargetPort)
+		logging.Info("ssh", "本地转发端口监听成功", "port", item.TargetPort, "bind", p.cfg.BindAddr)
 		p.localMu.Lock()
 		p.locals = append(p.locals, ln)
 		p.localMu.Unlock()

@@ -2,12 +2,13 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/console"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/direct"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/console"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/direct"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 // envLookup 便于测试替换。
@@ -22,6 +23,13 @@ type SSHConfig struct {
 	Pool     int
 	Locals   []CopyItem
 	Remotes  []CopyItem
+	// KnownHosts 服务端主机密钥的首次信任(TOFU)记录文件；
+	// 为空表示使用工作目录下的 known_hosts
+	KnownHosts string
+	// HostKeys 期望的服务端主机密钥指纹（SHA256:... 或裸 base64），非空时只接受匹配项
+	HostKeys []string
+	// BindAddr -L 本地转发的监听地址；空值表示全部网卡
+	BindAddr string
 }
 
 // Script 返回日志展示用的连接标识，与 Java 版一致。
@@ -35,8 +43,12 @@ type Config struct {
 	HTTPPort      int // -1 表示未启用
 	SocksUser     string
 	SocksPassword string
-	SSH           *SSHConfig
-	Direct        *direct.Rules
+	// BindAddr 代理与转发端口的监听地址；空值表示监听全部网卡（默认）
+	BindAddr string
+	// AllowUnauthPublic 允许在非回环地址上提供无认证代理
+	AllowUnauthPublic bool
+	SSH               *SSHConfig
+	Direct            *direct.Rules
 }
 
 // CheckWork 是否存在可执行任务。
@@ -85,20 +97,40 @@ func Load(r *Resolver) (*Config, error) {
 	}
 	cfg.SocksUser = r.Value("-suser", "SOCKS_USER", "")
 	cfg.SocksPassword = r.Value("-spwd", "SOCKS_PASSWORD", "")
+	cfg.BindAddr = strings.TrimSpace(r.Value("-bind", "BIND_ADDR", ""))
+	if cfg.AllowUnauthPublic, err = r.Bool("-allow-unauth-public", "ALLOW_UNAUTH_PUBLIC", false); err != nil {
+		return nil, err
+	}
 
+	// 账号密码必须成对出现：只配一半时如果静默当作「不启用认证」，
+	// 代理会变成对任何人都开放的内网跳板（巡检时实测只需 SOCKS_USER 一个变量即可绕过认证）
 	authReady := cfg.SocksUser != "" && cfg.SocksPassword != ""
+	if (cfg.SocksUser == "") != (cfg.SocksPassword == "") {
+		return nil, fmt.Errorf("SOCKS_USER 与 SOCKS_PASSWORD 必须同时配置，当前缺少 %s；"+
+			"单边配置会让代理变成完全无认证", missingAuthField(cfg.SocksUser, cfg.SocksPassword))
+	}
 	if cfg.SocksPort != -1 {
 		if authReady {
 			logging.Info("config", "socks5代理认证已启用", "user", cfg.SocksUser)
 		} else {
-			logging.Info("config", "socks5代理无授权认证")
+			logging.Warn("config", "socks5代理无授权认证", "bind", bindDesc(cfg.BindAddr))
 		}
 	}
 	if cfg.HTTPPort > 0 {
 		if authReady {
 			logging.Info("config", "http代理认证已启用", "user", cfg.SocksUser)
 		} else {
-			logging.Info("config", "http代理无授权认证")
+			logging.Warn("config", "http代理无授权认证", "bind", bindDesc(cfg.BindAddr))
+		}
+	}
+
+	// 无认证 + 对外监听 = 开放代理/内网跳板，默认拒绝启动；
+	// 确实需要（内网受控环境）时用 ALLOW_UNAUTH_PUBLIC=true 显式放行
+	if (cfg.SocksPort > 0 || cfg.HTTPPort > 0) && !authReady && !cfg.AllowUnauthPublic {
+		if !isLoopbackBind(cfg.BindAddr) {
+			return nil, fmt.Errorf("拒绝在 %s 上提供无认证代理（任意访问者都能把它当作代理与内网跳板）："+
+				"可配置 SOCKS_USER+SOCKS_PASSWORD、或设 BIND_ADDR=127.0.0.1 仅本机使用、"+
+				"或确认网络隔离后用 ALLOW_UNAUTH_PUBLIC=true 显式放行", bindDesc(cfg.BindAddr))
 		}
 	}
 
@@ -150,16 +182,75 @@ func Load(r *Resolver) (*Config, error) {
 			return nil, err
 		}
 		cfg.SSH = &SSHConfig{
-			Addr:     serverHost,
-			User:     serverUser,
-			Password: serverPassword,
-			Port:     sshPort,
-			Pool:     pool,
-			Locals:   locals,
-			Remotes:  remotes,
+			Addr:       serverHost,
+			User:       serverUser,
+			Password:   serverPassword,
+			Port:       sshPort,
+			Pool:       pool,
+			Locals:     locals,
+			Remotes:    remotes,
+			KnownHosts: strings.TrimSpace(r.Value("-known-hosts", "SSH_KNOWN_HOSTS", "")),
+			HostKeys:   splitTokens(r.Values("-host-key", "SSH_HOST_KEY")),
+			BindAddr:   cfg.BindAddr,
+		}
+		// -L 监听同样受 BIND_ADDR 影响；无认证的转发端口对外暴露时只告警，
+		// 因为端口转发的访问控制由运维的网络策略决定
+		if len(locals) > 0 && !isLoopbackBind(cfg.BindAddr) {
+			logging.Warn("config", "本地转发端口将对所有网卡开放",
+				"bind", bindDesc(cfg.BindAddr), "count", len(locals),
+				"hint", "如只需本机使用请设置 BIND_ADDR=127.0.0.1")
 		}
 	}
 	return cfg, nil
+}
+
+// missingAuthField 返回缺失的认证配置项名，用于错误提示。
+func missingAuthField(user, _ string) string {
+	if user == "" {
+		return "SOCKS_USER"
+	}
+	return "SOCKS_PASSWORD"
+}
+
+// bindDesc 返回监听地址的可读描述。
+func bindDesc(addr string) string {
+	if strings.TrimSpace(addr) == "" {
+		return "0.0.0.0（全部网卡）"
+	}
+	return addr
+}
+
+// isLoopbackBind 判断监听地址是否仅限回环。
+//
+// 空值、0.0.0.0、:: 都是「全部网卡」，属于对外暴露；
+// 只有 localhost/127.0.0.0/8/::1 才算仅本机。
+func isLoopbackBind(addr string) bool {
+	s := strings.TrimSpace(strings.ToLower(addr))
+	if s == "" {
+		return false
+	}
+	if s == "localhost" {
+		return true
+	}
+	if ip, err := netip.ParseAddr(s); err == nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// splitTokens 把环境变量中用逗号/分号/空白分隔的列表拆成多个取值。
+// 用于 SSH_HOST_KEY：环境变量只能传一个字符串，但可能要固定多把主机密钥
+// （如轮换期间新旧指纹并存）。
+func splitTokens(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.FieldsFunc(v, func(c rune) bool {
+			return c == ',' || c == '，' || c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n'
+		}) {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // readScript 读取端口转发配置；同名参数可重复传参。

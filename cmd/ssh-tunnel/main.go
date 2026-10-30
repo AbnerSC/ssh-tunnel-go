@@ -6,18 +6,20 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 内嵌时区数据库：精简基础镜像不带 tzdata，TZ=Asia/Shanghai 仍可生效
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/config"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/proxy"
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/sshpool"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/sshpool"
 )
 
 // 构建时通过 -ldflags "-X main.version=..." 注入
@@ -59,9 +61,19 @@ func handleOneShot(args []string) (int, bool) {
 		return health(args), true
 	}
 	if params.Contains("-encode") {
+		// 明文优先从参数取；没有参数时读标准输入。
+		// 直接写在命令行上会让密码进入 shell 历史与进程列表（ps 全用户可见）
 		plain := params.ValueOr("-encode", "")
 		if plain == "" {
-			fmt.Fprintln(os.Stderr, "用法: ssh-tunnel -encode <明文密码>")
+			data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "读取标准输入失败:", err)
+				return 1, true
+			}
+			plain = strings.TrimRight(string(data), "\r\n")
+		}
+		if plain == "" {
+			fmt.Fprintln(os.Stderr, "用法: ssh-tunnel -encode <明文密码>（推荐: echo 密码 | ssh-tunnel -encode）")
 			return 2, true
 		}
 		encoded, err := config.EncryptLayers(plain, config.MaxCipherLayers)
@@ -94,14 +106,28 @@ func health(args []string) int {
 		if err != nil || port <= 0 {
 			return 1
 		}
-		return probe(port)
+		// 监听地址可能被 BIND_ADDR 限定到具体网卡，探测必须跟着走，
+		// 否则容器会被持续标记为不健康
+		return probe(probeHost(r.Value("-bind", "BIND_ADDR", "")), port)
 	}
 	return 0
 }
 
+// probeHost 把监听地址翻译成可拨号的回环地址。
+func probeHost(bind string) string {
+	switch strings.TrimSpace(bind) {
+	case "", "0.0.0.0":
+		return "127.0.0.1"
+	case "::", "[::]":
+		return "::1"
+	default:
+		return strings.TrimSpace(bind)
+	}
+}
+
 // probe 探测本地端口是否可建立 TCP 连接。
-func probe(port int) int {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 3*time.Second)
+func probe(host string, port int) int {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 3*time.Second)
 	if err != nil {
 		return 1
 	}
@@ -132,6 +158,14 @@ func startStatsLoop(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// bindLogAddr 返回监听地址的日志展示值。
+func bindLogAddr(addr string) string {
+	if strings.TrimSpace(addr) == "" {
+		return "0.0.0.0"
+	}
+	return addr
 }
 
 // run 装配并运行全部代理/转发任务，返回进程退出码（0 正常，1 启动失败，2 配置错误）。
@@ -167,25 +201,25 @@ func run(ctx context.Context, args []string) int {
 
 	var listeners []net.Listener
 	if cfg.SocksPort > 0 {
-		ln, err := proxy.ListenTCP(cfg.SocksPort)
+		ln, err := proxy.ListenTCPOn(cfg.BindAddr, cfg.SocksPort)
 		if err != nil {
 			logging.Error("main", "socks5代理端口监听失败", "port", cfg.SocksPort, "err", err)
 			return 1
 		}
 		listeners = append(listeners, ln)
-		logging.Info("main", "socks5代理端口监听成功", "port", cfg.SocksPort)
+		logging.Info("main", "socks5代理端口监听成功", "port", cfg.SocksPort, "bind", bindLogAddr(cfg.BindAddr))
 		go proxy.ServeSocks5(ln, creds, &proxy.Route{
 			Proto: "socks5", Direct: direct, Tunnel: tunnel, Rules: cfg.Direct,
 		})
 	}
 	if cfg.HTTPPort > 0 {
-		ln, err := proxy.ListenTCP(cfg.HTTPPort)
+		ln, err := proxy.ListenTCPOn(cfg.BindAddr, cfg.HTTPPort)
 		if err != nil {
 			logging.Error("main", "http代理端口监听失败", "port", cfg.HTTPPort, "err", err)
 			return 1
 		}
 		listeners = append(listeners, ln)
-		logging.Info("main", "http代理端口监听成功", "port", cfg.HTTPPort)
+		logging.Info("main", "http代理端口监听成功", "port", cfg.HTTPPort, "bind", bindLogAddr(cfg.BindAddr))
 		go proxy.ServeHTTP(ln, creds, &proxy.Route{
 			Proto: "http", Direct: direct, Tunnel: tunnel, Rules: cfg.Direct,
 		})

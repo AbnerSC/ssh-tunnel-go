@@ -45,7 +45,9 @@ type Rotator struct {
 
 // NewRotator 创建并打开滚动日志文件。
 func NewRotator(dir string, maxDays int, maxBytes int64) (*Rotator, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 日志包含认证用户名、目标主机等运行信息，目录与文件默认不对其他用户开放：
+	// 容器内以非 root 运行时，0644 会让同宿主机的任意账户可读
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
 	r := &Rotator{
@@ -56,7 +58,7 @@ func NewRotator(dir string, maxDays int, maxBytes int64) (*Rotator, error) {
 		day:      time.Now().Format("2006-01-02"),
 		done:     make(chan struct{}),
 	}
-	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +126,7 @@ func (r *Rotator) Close() error {
 
 // openLocked 打开当前日志文件并绑定写缓冲。
 func (r *Rotator) openLocked() error {
-	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		return err
 	}

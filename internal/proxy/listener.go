@@ -2,17 +2,25 @@ package proxy
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"time"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 // ListenTCP 监听本地端口（含 IPv6 与 IPv4），与 Java 版 NetServer 一致。
 func ListenTCP(port int) (net.Listener, error) {
-	return net.Listen("tcp", fmt.Sprintf(":%d", port))
+	return ListenTCPOn("", port)
+}
+
+// ListenTCPOn 在指定地址上监听；addr 为空表示全部网卡。
+//
+// 单独提供地址参数的用途是收紧暴露面：无认证时仅监听 127.0.0.1，
+// 避免代理被外部直接当成内网跳板（仅靠防火墙并不是应用层能依赖的边界）。
+func ListenTCPOn(addr string, port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
 }
 
 // Serve 接受连接并逐连接并发处理。

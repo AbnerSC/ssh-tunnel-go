@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 const (
@@ -61,6 +61,14 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 
 	br := bufio.NewReaderSize(conn, httpReadBuffer)
 	for {
+		// 封禁拦截放在读请求之前：已处于封禁期的来源连一个请求也不处理。
+		// 仅在认证失败分支里检查是不够的——封禁期内携带正确凭据仍能通过，
+		// 且每次新连接都能再试一次，爆破速率并没有真正被压下去。
+		if creds.Enabled && creds.guard.Blocked(remote) {
+			logging.Warn("http", "来源处于认证封禁期，已断开", "remote", remote)
+			_ = writeAll(conn, replyAuthRequired)
+			return
+		}
 		head, err := readHeader(conn, br)
 		if err != nil {
 			if err == errHeaderTooLarge {
@@ -102,11 +110,16 @@ func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Crede
 
 	// 认证：http 代理使用 Proxy-Authorization: Basic
 	if creds.Enabled && !checkBasicAuth(headers["proxy-authorization"], creds) {
-		logging.Warn("http", "http代理认证不通过", "remote", remote)
+		banned := creds.guard.Fail(remote)
+		logging.Warn("http", "http代理认证不通过", "remote", remote, "banned", banned)
 		// 不携带 Connection: close：客户端可在同一连接上带凭据重试，
-		// 避免高并发下每个请求都要「新连接→407→关连接→再新连接」的双连接模式
+		// 避免高并发下每个请求都要「新连接→407→关连接→再新连接」的双连接模式；
+		// 但来源已达封禁阀值时直接断开，否则单连接就成了无限制的爆破通道
 		_ = writeAll(conn, replyAuthRequired)
-		return true
+		return !banned
+	}
+	if creds.Enabled {
+		creds.guard.Reset(remote)
 	}
 
 	// 认证通过，进入转发阶段：必须清除握手阶段的读截止时间。
@@ -167,9 +180,20 @@ func handleForward(conn net.Conn, br *bufio.Reader, method, uri, version string,
 		path = rest[slash:]
 	}
 	host, port, ok := parseHostPort(hostPortStr, 80)
-	if !ok {
+	if !ok || host == "" || strings.ContainsRune(host, '@') {
 		writeAndClose(conn, replyBadRequest)
 		return
+	}
+
+	// 同时出现 Transfer-Encoding 与 Content-Length 是典型的请求走私原语：
+	// 代理与源站取不同字段切分消息边界时会串包，这里直接拒绝
+	headers := parseHTTPHeaders(lines)
+	if _, hasTE := headers["transfer-encoding"]; hasTE {
+		if _, hasCL := headers["content-length"]; hasCL {
+			logging.Warn("http", "拒绝同时带 Transfer-Encoding 与 Content-Length 的请求", "remote", remote)
+			writeAndClose(conn, replyBadRequest)
+			return
+		}
 	}
 
 	// 重建请求报文：请求行改为源站形式，剔除逐跳/代理专用头，追加 Connection: close
@@ -180,19 +204,27 @@ func handleForward(conn net.Conn, br *bufio.Reader, method, uri, version string,
 	sb.WriteByte(' ')
 	sb.WriteString(version)
 	sb.WriteString("\r\n")
+	drop := hopByHopSet(headers["connection"])
 	for _, line := range lines[1:] {
 		c := strings.IndexByte(line, ':')
 		if c < 0 {
 			continue
 		}
 		key := strings.ToLower(strings.TrimSpace(line[:c]))
-		if key == "proxy-authorization" || key == "proxy-connection" || key == "connection" {
+		if _, skip := drop[key]; skip {
+			continue
+		}
+		// Host 必须改写为 URI 指定的目标：透传客户端自带的 Host 会让代理变成
+		// 「连 A 却说成 B」的绕过手段（虚拟主机/回源访问控制/缓存投毒）
+		if key == "host" {
 			continue
 		}
 		sb.WriteString(line)
 		sb.WriteString("\r\n")
 	}
-	sb.WriteString("Connection: close\r\n\r\n")
+	sb.WriteString("Host: ")
+	sb.WriteString(hostPortStr)
+	sb.WriteString("\r\nConnection: close\r\n\r\n")
 
 	targetAddr := net.JoinHostPort(host, strconv.Itoa(port))
 	logging.Debug("http", "http代理转发请求", "method", method, "target", targetAddr, "path", path, "remote", remote)
@@ -308,7 +340,48 @@ func parseHTTPHeaders(lines []string) map[string]string {
 	return headers
 }
 
+// hopByHopHeaders 逐跳头：只对单段连接有意义，代理不得透传给下一跳（RFC 7230 §6.1）。
+//
+// 透传这些头会带来实际风险：Keep-Alive/Connection 会改变源站的连接复用行为，
+// Proxy-* 会把代理凭据泄露给源站。
+//
+// 刻意不包含 transfer-encoding：本代理不解析请求体，剔除它会让 chunked 报文
+// 被当成普通正文发送，反而造成报文错位；报文边界安全靠「TE 与 CL 同时出现则拒绝」
+// 以及强制 Connection: close 保证。
+var hopByHopHeaders = []string{
+	"connection", "proxy-connection", "keep-alive", "te", "trailer",
+	"upgrade", "proxy-authorization", "proxy-authenticate",
+}
+
+// clientSpoofHeaders 可能被内网服务用来判断来源身份的头。
+//
+// 本代理不属于请求链路中的反向代理，不会追加这些头；若继续透传客户端自带的取值，
+// 任何能访问代理的人都能把来源伪装成任意内网地址（实测 X-Forwarded-For /
+// X-Real-IP 原样送达目标），基于这些头做访问控制的内网服务会被直接绕过。
+var clientSpoofHeaders = []string{
+	"x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
+	"x-real-ip", "forwarded", "via",
+}
+
+// hopByHopSet 返回本次请求需要剔除的头部集合：固定逐跳头 + Connection 头里列举的字段名。
+func hopByHopSet(connection string) map[string]struct{} {
+	drop := make(map[string]struct{}, len(hopByHopHeaders)+len(clientSpoofHeaders)+4)
+	for _, h := range hopByHopHeaders {
+		drop[h] = struct{}{}
+	}
+	for _, h := range clientSpoofHeaders {
+		drop[h] = struct{}{}
+	}
+	for _, token := range strings.Split(connection, ",") {
+		if name := strings.ToLower(strings.TrimSpace(token)); name != "" {
+			drop[name] = struct{}{}
+		}
+	}
+	return drop
+}
+
 // checkBasicAuth 校验 Proxy-Authorization: Basic base64(user:password)。
+// 凭据比较使用常量时间，避免响应时间差异泄露正确前缀。
 func checkBasicAuth(header string, creds Credentials) bool {
 	if len(header) < 6 || !strings.EqualFold(header[:6], "Basic ") {
 		return false
@@ -322,7 +395,7 @@ func checkBasicAuth(header string, creds Credentials) bool {
 	if idx < 0 {
 		return false
 	}
-	return str[:idx] == creds.User && str[idx+1:] == creds.Password
+	return credentialMatch(str[:idx], str[idx+1:], creds.User, creds.Password)
 }
 
 // parseHostPort 解析 host:port，兼容 IPv6 字面量 [::1]:port；未给出端口时使用 defaultPort。

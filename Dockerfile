@@ -5,7 +5,7 @@
 #   - 编译阶段固定在构建机原生架构（--platform=$BUILDPLATFORM），
 #     通过 GOOS/GOARCH 交叉编译出目标架构的静态二进制，编译阶段无需 QEMU 模拟
 #   - 运行阶段基于 debian bookworm-slim（官方多架构镜像），拷贝静态二进制并安装
-#     ca-certificates / curl；该阶段的 apt-get 以目标架构执行，跨架构构建需要 QEMU
+#     ca-certificates；该阶段的 apt-get 以目标架构执行，跨架构构建需要 QEMU
 #     （CI 已通过 setup-qemu 提供）
 #
 # 与 Java 版镜像的兼容性：
@@ -15,6 +15,12 @@
 #   - 日志仍写入 /app/logs（按天滚动，保留 30 天 / 上限 1GB）
 #   - 健康检查改用二进制内置的 -health 子命令，不依赖 bash 的 /dev/tcp
 #
+# 安全基线（以非 root 运行）：
+#   - 运行阶段只装 ca-certificates，不装 curl/调试工具，减小攻击面
+#   - 使用 uid/gid 10001 的非特权用户，/app 与其下 known_hosts、logs 均归其所有
+#   - 日志目录 0750、日志文件 0640，不对其他用户开放
+#   - 若需监听 1024 以下端口，请用 --cap-add=NET_BIND_SERVICE 或改用高位端口
+#
 # 本地手动构建多架构镜像：
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t ssh-tunnel:latest --push .
@@ -22,7 +28,7 @@
 # 国内环境构建由 Gitea Actions 注入内部 Go 代理加速依赖下载；
 # 手动构建同样可选注入公共代理：
 #   --build-arg GOPROXY=https://goproxy.cn,direct
-# 同样可选的 apt 镜像源（加速运行阶段 ca-certificates / curl 安装）：
+# 同样可选的 apt 镜像源（加速运行阶段 ca-certificates 安装）：
 #   --build-arg APT_MIRROR=repo.huaweicloud.com
 # =====================================================================
 
@@ -69,6 +75,7 @@ WORKDIR /app
 ARG APT_MIRROR
 
 # 静态二进制不依赖 libc；ca-certificates 供直连目标时按系统证书校验（如有）
+# 不安装 curl 等调试工具：镜像内没有可以从外部触发的下载/命令执行工具链
 # 动态替换镜像源（兼容 DEB822 格式与旧版 sources.list 格式；APT_MIRROR 为空则保持官方源）
 RUN if [ -n "${APT_MIRROR}" ]; then \
         sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
@@ -76,10 +83,21 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
         sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/ssh-tunnel /app/ssh-tunnel
+
+# 非 root 运行：进程被攻破后拿到的只是普通用户权限，无法直接改二进制/读宿主目录
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd -g ${APP_GID} app && \
+    useradd -u ${APP_UID} -g ${APP_GID} -M -d /app -s /usr/sbin/nologin app && \
+    mkdir -p /app/logs && \
+    touch /app/known_hosts && \
+    chown -R app:app /app && \
+    chmod 0750 /app/logs && \
+    chmod 0600 /app/known_hosts
 
 # 入口脚本仅做 exec 转发；环境变量 -> 参数 的转换已内置在二进制中
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -102,15 +120,23 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 #   FORCE_DOMAIN   -> -force-domain   强制走隧道的域名，优先于直连规则
 #   LOG_FORMAT     -> json（默认）/ text（Java 版同构文本格式）
 #   LOG_LEVEL      -> debug / info（默认）/ warn / error
+#   BIND_ADDR      -> -bind          代理与 -L 端口的监听地址（默认 0.0.0.0）
+#   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
+#   SSH_KNOWN_HOSTS -> -known-hosts  服务端主机密钥记录文件（默认 /app/known_hosts）
+#   SSH_HOST_KEY    -> -host-key     固定服务端主机密钥指纹（SHA256:...，可逗号分隔多个）
 #   JAVA_OPTS      -> Java 版遗留变量，Go 版接受但忽略
 ENV SOCKS_PORT= \
     SOCKS_USER= \
     SOCKS_PASSWORD= \
     HTTP_PORT= \
+    BIND_ADDR= \
+    ALLOW_UNAUTH_PUBLIC= \
     SSH_SERVER= \
     SSH_PORT= \
     SSH_PASSWORD= \
     SSH_POOL= \
+    SSH_KNOWN_HOSTS= \
+    SSH_HOST_KEY= \
     DIRECT_IP= \
     DIRECT_DOMAIN= \
     DIRECT_CN= \
@@ -118,6 +144,8 @@ ENV SOCKS_PORT= \
     LOG_FORMAT= \
     LOG_LEVEL= \
     JAVA_OPTS=
+
+USER app
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 

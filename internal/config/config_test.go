@@ -9,7 +9,9 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
+		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
+		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
 	} {
 		t.Setenv(key, "")
@@ -28,8 +30,8 @@ func TestLoadProductionCompose(t *testing.T) {
 		"SSH_PORT":       "22",
 		"SSH_PASSWORD":   "croot!123",
 		"SSH_POOL":       "6",
-		"DIRECT_IP":      "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1,119.6.200.182",
-		"DIRECT_DOMAIN":  "localhost,mmxx.fun,05200809.xyz,openeuler.org",
+		"DIRECT_IP":      "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1,119.112.123.222",
+		"DIRECT_DOMAIN":  "localhost,1997.fun,05200809.xyz,openeuler.org",
 		"DIRECT_CN":      "true",
 	}
 	for k, v := range env {
@@ -59,7 +61,7 @@ func TestLoadProductionCompose(t *testing.T) {
 		t.Fatalf("SSH 参数解析错误: %+v", cfg.SSH)
 	}
 
-	directIPs := []string{"192.168.1.1", "10.1.2.3", "172.16.5.5", "127.0.0.1", "119.6.200.182"}
+	directIPs := []string{"192.168.1.1", "10.1.2.3", "172.16.5.5", "127.0.0.1", "119.112.123.222"}
 	for _, ip := range directIPs {
 		if !cfg.Direct.IsDirect(ip) {
 			t.Fatalf("%s 应命中直连", ip)
@@ -68,13 +70,13 @@ func TestLoadProductionCompose(t *testing.T) {
 	if cfg.Direct.IsDirect("223.5.5.5") {
 		t.Fatal("223.5.5.5 不应命中直连")
 	}
-	for _, d := range []string{"localhost", "mmxx.fun", "a.mmxx.fun", "openeuler.org", "www.openeuler.org"} {
+	for _, d := range []string{"localhost", "1997.fun", "a.1997.fun", "openeuler.org", "www.openeuler.org"} {
 		if !cfg.Direct.IsDirect(d) {
 			t.Fatalf("%s 应命中直连", d)
 		}
 	}
-	if cfg.Direct.IsDirect("notmmxx.fun") {
-		t.Fatal("notmmxx.fun 不应命中直连")
+	if cfg.Direct.IsDirect("not1997.fun") {
+		t.Fatal("not1997.fun 不应命中直连")
 	}
 	// geosite:cn 已内嵌加载
 	if cfg.Direct.DomainRuleCount() < 6000 {
@@ -171,6 +173,8 @@ func TestLoadForwardRules(t *testing.T) {
 func TestLoadEnvPriorityOverArgs(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SOCKS_PORT", "11823")
+	// 无认证代理默认只能在回环上开，这里显式放行以验证参数优先级
+	t.Setenv("ALLOW_UNAUTH_PUBLIC", "true")
 	cfg, err := Load(NewResolver([]string{"-D", "6666"}))
 	if err != nil {
 		t.Fatalf("Load 失败: %v", err)
@@ -225,5 +229,96 @@ func TestLoadInvalidPort(t *testing.T) {
 	clearEnv(t)
 	if _, err := Load(NewResolver([]string{"-D", "abc"})); err == nil {
 		t.Fatal("非法端口应报错")
+	}
+}
+
+// TestLoadRejectsHalfAuthConfig 只配一半凭据时必须报错。
+//
+// 旧实现把「账号或密码为空」等同于「不启用认证」，因此只设一个环境变量
+// 就能把带认证的代理降级成完全开放；这里锁定报错行为。
+func TestLoadRejectsHalfAuthConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		user string
+		pwd  string
+	}{
+		{name: "只有账号", user: "admin"},
+		{name: "只有密码", pwd: "S3cret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SOCKS_PORT", "1080")
+			t.Setenv("SOCKS_USER", tc.user)
+			t.Setenv("SOCKS_PASSWORD", tc.pwd)
+			if _, err := Load(NewResolver(nil)); err == nil {
+				t.Fatal("单边认证配置必须报错，否则代理会静默降级为无认证")
+			}
+		})
+	}
+}
+
+// TestLoadRejectsUnauthPublicByDefault 无认证 + 对外监听必须默认拒绝启动。
+func TestLoadRejectsUnauthPublicByDefault(t *testing.T) {
+	for _, bind := range []string{"", "0.0.0.0", "::"} {
+		clearEnv(t)
+		t.Setenv("SOCKS_PORT", "1080")
+		if bind != "" {
+			t.Setenv("BIND_ADDR", bind)
+		}
+		if _, err := Load(NewResolver(nil)); err == nil {
+			t.Fatalf("bind=%q 时无认证代理对外监听应被拒绝", bind)
+		}
+	}
+}
+
+// TestLoadAllowsUnauthOnLoopback 仅监听回环时允许无认证（本机自用场景）。
+func TestLoadAllowsUnauthOnLoopback(t *testing.T) {
+	for _, bind := range []string{"127.0.0.1", "::1", "localhost"} {
+		clearEnv(t)
+		t.Setenv("SOCKS_PORT", "1080")
+		t.Setenv("BIND_ADDR", bind)
+		cfg, err := Load(NewResolver(nil))
+		if err != nil {
+			t.Fatalf("bind=%q 时回环无认证应允许: %v", bind, err)
+		}
+		if cfg.BindAddr != bind {
+			t.Fatalf("BIND_ADDR 解析错误: %q", cfg.BindAddr)
+		}
+		if cfg.SSH != nil && cfg.SSH.BindAddr != bind {
+			t.Fatalf("本地转发应继承 BIND_ADDR: %q", cfg.SSH.BindAddr)
+		}
+	}
+}
+
+// TestLoadAllowsUnauthWithExplicitOptIn 显式放行后才允许对外无认证。
+func TestLoadAllowsUnauthWithExplicitOptIn(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("HTTP_PORT", "8080")
+	t.Setenv("ALLOW_UNAUTH_PUBLIC", "true")
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("显式放行后应允许: %v", err)
+	}
+	if !cfg.AllowUnauthPublic {
+		t.Fatal("ALLOW_UNAUTH_PUBLIC 未解析")
+	}
+}
+
+// TestLoadParsesHostKeyOptions 主机密钥校验相关配置应能通过参数与环境变量传入。
+func TestLoadParsesHostKeyOptions(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+	t.Setenv("SSH_KNOWN_HOSTS", "/etc/ssh-tunnel/known_hosts")
+	t.Setenv("SSH_HOST_KEY", "SHA256:abc,def")
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.SSH.KnownHosts != "/etc/ssh-tunnel/known_hosts" {
+		t.Fatalf("SSH_KNOWN_HOSTS 未解析: %q", cfg.SSH.KnownHosts)
+	}
+	if len(cfg.SSH.HostKeys) != 2 {
+		t.Fatalf("SSH_HOST_KEY 应支持多个值: %+v", cfg.SSH.HostKeys)
 	}
 }

@@ -10,6 +10,13 @@
 *.test
 coverage.out
 
+# 服务端主机密钥首次信任记录（运行时生成，含环境指纹）
+/known_hosts
+**/known_hosts
+
+# 安全巡检临时目录
+/.audit-tmp/
+
 # IDE
 .idea/
 .vscode/

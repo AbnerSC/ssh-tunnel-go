@@ -57,12 +57,48 @@ services:
 | `DIRECT_DOMAIN`  | `-direct-domain` | 直连域名，匹配主域名（逗号或空格分隔，可选）                                                   |
 | `DIRECT_CN`      | `-direct-cn`     | 中国域名全量直连，取值 `true` 启用默认 `cn` 列表，也可直接写 geosite 名(如 `cn,private`，可选) |
 | `FORCE_DOMAIN`   | `-force-domain`  | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                             |
+| `BIND_ADDR`      | `-bind`          | 代理与 `-L` 转发端口的监听地址，默认 `0.0.0.0`；设 `127.0.0.1` 则仅本机可用（可选）            |
+| `ALLOW_UNAUTH_PUBLIC` | `-allow-unauth-public` | 允许在非回环地址上提供**无认证**代理，默认 `false`（启动时报错）                        |
+| `SSH_KNOWN_HOSTS` | `-known-hosts`  | 服务端主机密钥记录文件，默认工作目录下的 `known_hosts`（容器内为 `/app/known_hosts`）         |
+| `SSH_HOST_KEY`   | `-host-key`      | 固定服务端主机密钥指纹（`SHA256:...`），可重复传参或逗号分隔多个；设置后只接受匹配的指纹         |
+
+### 安全基线（重要）
+
+代理端口一旦暴露在网络上，就是一个能访问服务器侧内网的入口，部署前请确认以下几项：
+
+1. **必须配置代理认证**。`SOCKS_USER` 与 `SOCKS_PASSWORD` 需要**同时**配置；只配其中一个会直接启动失败（旧版会静默降级成无认证代理）。
+2. **无认证代理默认不允许对外监听**。未配认证且 `BIND_ADDR` 不是回环地址时进程会拒绝启动，并提示三种处理方式：
+   - 配置 `SOCKS_USER` + `SOCKS_PASSWORD`；
+   - 设 `BIND_ADDR=127.0.0.1`（仅本机/同机容器使用）；
+   - 确认有网络隔离后显式设 `ALLOW_UNAUTH_PUBLIC=true`。
+3. **认证失败会限速封禁**。同一来源 IP 1 分钟内失败 10 次即封禁 5 分钟，并把连接压到不可爆破的速率；成功认证会清零计数。
+4. **SSH 主机密钥默认首次信任（TOFU）**。首次连接会把服务端指纹写入 `SSH_KNOWN_HOSTS`，之后指纹变化会拒绝连接并报“主机密钥已变更”；生产环境建议直接用 `SSH_HOST_KEY` 固定指纹，避免首次连接被中间人冒领：
+   ```bash
+   ssh-keyscan -p 22 1.2.3.4 | ssh-keygen -lf -   # 取 SHA256 指纹
+   ```
+5. **HTTPS 请用 CONNECT 隧道**。普通 HTTP 转发会改写 `Host`、剔除逐跳头与 `X-Forwarded-For`/`X-Real-IP` 等可伪造来源的头，并拒绝 `Transfer-Encoding` 与 `Content-Length` 共存的请求；HTTPS 走 `CONNECT` 全程加密透传。
+6. **日志已清洗**。文本模式下字段值中的换行/控制字符会被转义，无法通过用户名等输入伪造整行日志；日志文件权限为 `0640`。
+7. **容器以非 root 运行**（uid 10001），只装 `ca-certificates`；如需监听 1024 以下端口请用 `--cap-add=NET_BIND_SERVICE` 或改用高位端口。
+8. **建议再叠一层运行时约束**。镜像本身已用非 root，但 Docker 默认仍允许提权到 setuid 程序，建议启动时补上下面三个参数（实测镜像在非 root 下 `CapEff` 已为 0，再加这些参数可进一步封死提权与落盘）：
+   ```bash
+   docker run -d --name ssh-tunnel \
+     --security-opt no-new-privileges \
+     --cap-drop ALL \
+     --read-only --tmpfs /tmp \
+     -v ssh-tunnel-logs:/app/logs \
+     -p 127.0.0.1:6666:6666 -p 127.0.0.1:6667:6667 \
+     -e SOCKS_PORT=6666 -e HTTP_PORT=6667 \
+     -e SOCKS_USER=user -e SOCKS_PASSWORD=pwd \
+     -e SSH_SERVER=root@1.2.3.4 -e SSH_PASSWORD=pwd \
+     ssh-tunnel:latest
+   ```
+   注意 `--read-only` 时 `/app/known_hosts` 需改为挂载到可写卷（或改用 `SSH_HOST_KEY` 固定指纹，不再落盘），端口发布也请绑定回环地址。
 
 ### 使用测试
 
 1. 测试HTTP代理
 ```bash
-# 未配置账号密码
+# 未配置账号密码（仅限 BIND_ADDR=127.0.0.1 或 ALLOW_UNAUTH_PUBLIC=true）
 curl -x http://127.0.0.1:6667 https://www.google.com
 
 # 已配置账号密码

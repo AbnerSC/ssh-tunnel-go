@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"git.edge.05200809.xyz/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
 )
 
 var (

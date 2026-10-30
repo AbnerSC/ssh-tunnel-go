@@ -65,7 +65,9 @@ func clearAllEnv(t *testing.T) {
 	for _, key := range []string{
 		"LOG_FORMAT", "LOG_LEVEL",
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
+		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
+		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
 	} {
 		t.Setenv(key, "")
@@ -106,6 +108,29 @@ func TestHealth(t *testing.T) {
 	t.Setenv("HTTP_PORT", "")
 	if code := health(nil); code != 0 {
 		t.Fatalf("未配置 HTTP_PORT 时应探测 SOCKS_PORT: %d", code)
+	}
+}
+
+// TestHealthRespectsBindAddr 限定监听地址后，健康检查必须探测同一个地址。
+func TestHealthRespectsBindAddr(t *testing.T) {
+	clearAllEnv(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	t.Setenv("HTTP_PORT", strconv.Itoa(port))
+	t.Setenv("BIND_ADDR", "127.0.0.1")
+	if code := health(nil); code != 0 {
+		t.Fatalf("BIND_ADDR=127.0.0.1 时应健康: %d", code)
+	}
+
+	// 0.0.0.0 是「全部网卡」，探测仍应回落到回环地址而不是直接拨 0.0.0.0
+	t.Setenv("BIND_ADDR", "0.0.0.0")
+	if code := health(nil); code != 0 {
+		t.Fatalf("BIND_ADDR=0.0.0.0 时应回落到回环探测: %d", code)
 	}
 }
 

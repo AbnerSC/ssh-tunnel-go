@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ParamFormat 复刻 Java 版参数解析语义：
@@ -125,6 +126,24 @@ func (r *Resolver) Values(flag, env string) []string {
 		out = append(out, v)
 	}
 	return append(out, r.params.Values(flag)...)
+}
+
+// Bool 解析布尔配置：true/false、1/0、yes/no、on/off 均可，未配置时返回 def。
+// 用于 ALLOW_UNAUTH_PUBLIC 这类安全开关：取值写错时报错而不是静默当成 false，
+// 避免运维以为已放行（或已收紧）却得到相反结果。
+func (r *Resolver) Bool(flag, env string, def bool) (bool, error) {
+	if !r.Has(flag, env) {
+		return def, nil
+	}
+	v := strings.ToLower(strings.TrimSpace(r.Value(flag, env, "")))
+	switch v {
+	case "", "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("参数 %s 取值非法: %q", flag, v)
+	}
 }
 
 // Int 解析整型配置。

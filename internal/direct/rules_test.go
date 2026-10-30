@@ -37,13 +37,13 @@ func TestRulesIPv6(t *testing.T) {
 }
 
 func TestRulesDomain(t *testing.T) {
-	r := New(nil, []string{"mmxx.fun", "openeuler.org", "example.com."})
+	r := New(nil, []string{"1997.fun", "openeuler.org", "example.com."})
 	cases := map[string]bool{
-		"mmxx.fun":            true,
-		"a.mmxx.fun":          true,
-		"A.MMXX.FUN":          true,
-		"mmxx.fun.":           true,
-		"notmmxx.fun":         false,
+		"1997.fun":            true,
+		"a.1997.fun":          true,
+		"A.1997.fun":          true,
+		"1997.fun.":           true,
+		"not1997.fun":         false,
 		"xopeneuler.org":      false, // 必须是主域或其子域
 		"www.openeuler.org":   true,
 		"example.com":         true,
@@ -148,8 +148,8 @@ func TestForceDomainOverridesDirect(t *testing.T) {
 	}
 
 	// 不相关域名不受影响
-	for _, host := range []string{"www.baidu.com", "www.qq.com", "mmxx.fun"} {
-		if host == "mmxx.fun" {
+	for _, host := range []string{"www.baidu.com", "www.qq.com", "1997.fun"} {
+		if host == "1997.fun" {
 			continue
 		}
 		if !r.IsDirect(host) {
