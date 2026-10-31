@@ -23,11 +23,22 @@ func ListenTCPOn(addr string, port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
 }
 
+// defaultLimiter 全进程共用的连接限制器。
+//
+// SOCKS5 与 HTTP 代理必须共享同一份配额：各自持有限制器时，
+// 攻击者只要同时打两个端口就能拿到双倍上限。
+var defaultLimiter = newConnLimiter(maxConns, maxConnsPerIP)
+
 // Serve 接受连接并逐连接并发处理。
 //
 // 单连接处理中发生 panic 只影响该连接：代理直接面对不可信输入，
 // 不能让一条畸形请求终止整个进程。
 func Serve(ln net.Listener, component string, handler func(net.Conn)) {
+	serve(ln, component, handler, defaultLimiter)
+}
+
+// serve 使用指定的限制器接受连接，便于测试注入小额上限。
+func serve(ln net.Listener, component string, handler func(net.Conn), limiter *connLimiter) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -39,7 +50,20 @@ func Serve(ln net.Listener, component string, handler func(net.Conn)) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		release, ok := limiter.acquire(conn.RemoteAddr())
+		if !ok {
+			// 超限直接关闭：不回 407/0xFF 等应答，避免给洪泛方额外反馈
+			if shouldLog, rejected := limiter.shouldLogReject(time.Now()); shouldLog {
+				logging.Warn(component, "并发连接数已达上限，已拒绝新连接",
+					"remote", conn.RemoteAddr(),
+					"maxTotal", limiter.maxTotal, "maxPerIP", limiter.maxPerIP,
+					"rejected", rejected)
+			}
+			_ = conn.Close()
+			continue
+		}
 		go func() {
+			defer release()
 			activeConns.Add(1)
 			totalConns.Add(1)
 			defer activeConns.Add(-1)

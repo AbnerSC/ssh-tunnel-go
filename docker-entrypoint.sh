@@ -12,6 +12,7 @@
 #   HTTP_PORT       -> -H      本地 http 代理监听端口
 #   BIND_ADDR       -> -bind          代理与 -L 端口的监听地址（默认 0.0.0.0）
 #   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
+#   ALLOW_PUBLIC_FORWARD -> -allow-public-forward 允许无认证的 -L 转发端口对外监听（默认拒绝）
 #   SSH_SERVER      -> -server 隧道服务器地址与账号，如 root@1.2.3.4
 #   SSH_PORT        -> -p      服务器 SSH 端口
 #   SSH_PASSWORD    -> -P      服务器 SSH 密码

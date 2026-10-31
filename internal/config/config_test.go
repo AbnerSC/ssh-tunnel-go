@@ -9,7 +9,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
-		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC",
+		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC", "ALLOW_PUBLIC_FORWARD",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
@@ -140,6 +140,8 @@ func TestLoadNoWork(t *testing.T) {
 func TestLoadForwardRules(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+	// 本地转发端口无认证，默认禁止非回环监听；这里验证规则解析，显式放行
+	t.Setenv("ALLOW_PUBLIC_FORWARD", "true")
 	cfg, err := Load(NewResolver([]string{
 		"-L", "127.0.0.1:80-8080",
 		"-s", "127.0.0.1:81-8081",
@@ -302,6 +304,66 @@ func TestLoadAllowsUnauthWithExplicitOptIn(t *testing.T) {
 	}
 	if !cfg.AllowUnauthPublic {
 		t.Fatal("ALLOW_UNAUTH_PUBLIC 未解析")
+	}
+}
+
+// TestLoadRejectsPublicLocalForwardByDefault 无认证的 -L 端口默认不得对非回环地址监听。
+//
+// 转发端口不经过任何认证，默认 0.0.0.0 监听等于把内网目标（数据库、SSH 等）
+// 直接开放给整个网段，因此与无认证代理采用同一策略：必须显式放行。
+func TestLoadRejectsPublicLocalForwardByDefault(t *testing.T) {
+	for _, bind := range []string{"", "0.0.0.0", "::"} {
+		t.Run("bind="+bind, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SSH_SERVER", "root@1.2.3.4")
+			if bind != "" {
+				t.Setenv("BIND_ADDR", bind)
+			}
+			if _, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"})); err == nil {
+				t.Fatalf("bind=%q 时无认证本地转发对外监听应被拒绝", bind)
+			}
+		})
+	}
+}
+
+// TestLoadAllowsLocalForwardOnLoopback 仅监听回环时允许无认证转发（本机自用）。
+func TestLoadAllowsLocalForwardOnLoopback(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+	t.Setenv("BIND_ADDR", "127.0.0.1")
+	cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"}))
+	if err != nil {
+		t.Fatalf("回环监听应允许: %v", err)
+	}
+	if cfg.AllowPublicForward {
+		t.Fatal("未显式配置时 AllowPublicForward 应为 false")
+	}
+	if cfg.SSH == nil || len(cfg.SSH.Locals) != 1 {
+		t.Fatalf("-L 规则未生效: %+v", cfg.SSH)
+	}
+}
+
+// TestLoadAllowsPublicLocalForwardWithOptIn 显式放行后才允许转发端口对外监听。
+func TestLoadAllowsPublicLocalForwardWithOptIn(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+	t.Setenv("ALLOW_PUBLIC_FORWARD", "true")
+	cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"}))
+	if err != nil {
+		t.Fatalf("显式放行后应允许: %v", err)
+	}
+	if !cfg.AllowPublicForward {
+		t.Fatal("ALLOW_PUBLIC_FORWARD 未解析")
+	}
+}
+
+// TestLoadRejectsInvalidPublicForwardValue 开关写错时不得静默当成 false/true。
+func TestLoadRejectsInvalidPublicForwardValue(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+	t.Setenv("ALLOW_PUBLIC_FORWARD", "yes-please")
+	if _, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"})); err == nil {
+		t.Fatal("非法布尔值应报错")
 	}
 }
 

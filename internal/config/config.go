@@ -47,8 +47,11 @@ type Config struct {
 	BindAddr string
 	// AllowUnauthPublic 允许在非回环地址上提供无认证代理
 	AllowUnauthPublic bool
-	SSH               *SSHConfig
-	Direct            *direct.Rules
+	// AllowPublicForward 允许 -L 本地转发端口在非回环地址上监听。
+	// 转发端口本身没有任何认证，默认与代理端口同一策略：非回环即拒绝启动
+	AllowPublicForward bool
+	SSH                *SSHConfig
+	Direct             *direct.Rules
 }
 
 // CheckWork 是否存在可执行任务。
@@ -99,6 +102,9 @@ func Load(r *Resolver) (*Config, error) {
 	cfg.SocksPassword = r.Value("-spwd", "SOCKS_PASSWORD", "")
 	cfg.BindAddr = strings.TrimSpace(r.Value("-bind", "BIND_ADDR", ""))
 	if cfg.AllowUnauthPublic, err = r.Bool("-allow-unauth-public", "ALLOW_UNAUTH_PUBLIC", false); err != nil {
+		return nil, err
+	}
+	if cfg.AllowPublicForward, err = r.Bool("-allow-public-forward", "ALLOW_PUBLIC_FORWARD", false); err != nil {
 		return nil, err
 	}
 
@@ -193,12 +199,19 @@ func Load(r *Resolver) (*Config, error) {
 			HostKeys:   splitTokens(r.Values("-host-key", "SSH_HOST_KEY")),
 			BindAddr:   cfg.BindAddr,
 		}
-		// -L 监听同样受 BIND_ADDR 影响；无认证的转发端口对外暴露时只告警，
-		// 因为端口转发的访问控制由运维的网络策略决定
+		// -L 监听同样受 BIND_ADDR 影响，但它与代理端口一样没有任何认证：
+		// 默认对非回环地址监听等于把内网目标（如 127.0.0.1:3306）直接开放给
+		// 整个网段，因此与无认证代理采用同一策略——非回环必须显式放行。
+		if len(locals) > 0 && !isLoopbackBind(cfg.BindAddr) && !cfg.AllowPublicForward {
+			return nil, fmt.Errorf("拒绝在 %s 上提供无认证的本地端口转发（%d 条 -L/-s，"+
+				"任意访问者都能经它访问对应目标）：可设 BIND_ADDR=127.0.0.1 仅本机使用、"+
+				"或确认网络隔离后用 ALLOW_PUBLIC_FORWARD=true 显式放行",
+				bindDesc(cfg.BindAddr), len(locals))
+		}
 		if len(locals) > 0 && !isLoopbackBind(cfg.BindAddr) {
 			logging.Warn("config", "本地转发端口将对所有网卡开放",
 				"bind", bindDesc(cfg.BindAddr), "count", len(locals),
-				"hint", "如只需本机使用请设置 BIND_ADDR=127.0.0.1")
+				"hint", "已通过 ALLOW_PUBLIC_FORWARD=true 显式放行")
 		}
 	}
 	return cfg, nil

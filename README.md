@@ -33,6 +33,8 @@ services:
       - DIRECT_DOMAIN=localhost,xxxx.fun,xxxx.xyz
       - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn
       - DIRECT_CN=true
+      - ALLOW_UNAUTH_PUBLIC=false
+      - ALLOW_PUBLIC_FORWARD=false
     ports:
       - 16666:6666
       - 16667:6667
@@ -59,6 +61,7 @@ services:
 | `FORCE_DOMAIN`   | `-force-domain`  | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                             |
 | `BIND_ADDR`      | `-bind`          | 代理与 `-L` 转发端口的监听地址，默认 `0.0.0.0`；设 `127.0.0.1` 则仅本机可用（可选）            |
 | `ALLOW_UNAUTH_PUBLIC` | `-allow-unauth-public` | 允许在非回环地址上提供**无认证**代理，默认 `false`（启动时报错）                        |
+| `ALLOW_PUBLIC_FORWARD` | `-allow-public-forward` | 允许无认证的 `-L` 本地转发端口在非回环地址上监听，默认 `false`（启动时报错）           |
 | `SSH_KNOWN_HOSTS` | `-known-hosts`  | 服务端主机密钥记录文件，默认工作目录下的 `known_hosts`（容器内为 `/app/known_hosts`）         |
 | `SSH_HOST_KEY`   | `-host-key`      | 固定服务端主机密钥指纹（`SHA256:...`），可重复传参或逗号分隔多个；设置后只接受匹配的指纹         |
 
@@ -71,15 +74,16 @@ services:
    - 配置 `SOCKS_USER` + `SOCKS_PASSWORD`；
    - 设 `BIND_ADDR=127.0.0.1`（仅本机/同机容器使用）；
    - 确认有网络隔离后显式设 `ALLOW_UNAUTH_PUBLIC=true`。
-3. **认证失败会限速封禁**。同一来源 IP 1 分钟内失败 10 次即封禁 5 分钟，并把连接压到不可爆破的速率；成功认证会清零计数。
-4. **SSH 主机密钥默认首次信任（TOFU）**。首次连接会把服务端指纹写入 `SSH_KNOWN_HOSTS`，之后指纹变化会拒绝连接并报“主机密钥已变更”；生产环境建议直接用 `SSH_HOST_KEY` 固定指纹，避免首次连接被中间人冒领：
+3. **无认证的 `-L` 转发端口默认不允许对外监听**。转发端口本身不做任何认证，`BIND_ADDR` 不是回环地址（含默认的 `0.0.0.0`）时进程会拒绝启动；确需对外暴露时设 `ALLOW_PUBLIC_FORWARD=true` 显式放行，并自行确保网络隔离。
+4. **认证失败会限速封禁**。同一来源 IP 1 分钟内失败 10 次即封禁 5 分钟，并把连接压到不可爆破的速率；成功认证会清零计数。
+5. **SSH 主机密钥默认首次信任（TOFU）**。首次连接会把服务端指纹写入 `SSH_KNOWN_HOSTS`，之后指纹变化会拒绝连接并报“主机密钥已变更”；生产环境建议直接用 `SSH_HOST_KEY` 固定指纹，避免首次连接被中间人冒领：
    ```bash
    ssh-keyscan -p 22 1.2.3.4 | ssh-keygen -lf -   # 取 SHA256 指纹
    ```
-5. **HTTPS 请用 CONNECT 隧道**。普通 HTTP 转发会改写 `Host`、剔除逐跳头与 `X-Forwarded-For`/`X-Real-IP` 等可伪造来源的头，并拒绝 `Transfer-Encoding` 与 `Content-Length` 共存的请求；HTTPS 走 `CONNECT` 全程加密透传。
-6. **日志已清洗**。文本模式下字段值中的换行/控制字符会被转义，无法通过用户名等输入伪造整行日志；日志文件权限为 `0640`。
-7. **容器以非 root 运行**（uid 10001），只装 `ca-certificates`；如需监听 1024 以下端口请用 `--cap-add=NET_BIND_SERVICE` 或改用高位端口。
-8. **建议再叠一层运行时约束**。镜像本身已用非 root，但 Docker 默认仍允许提权到 setuid 程序，建议启动时补上下面三个参数（实测镜像在非 root 下 `CapEff` 已为 0，再加这些参数可进一步封死提权与落盘）：
+6. **HTTPS 请用 CONNECT 隧道**。普通 HTTP 转发会改写 `Host`、剔除逐跳头与 `X-Forwarded-For`/`X-Real-IP` 等可伪造来源的头，并拒绝 `Transfer-Encoding` 与 `Content-Length` 共存的请求；HTTPS 走 `CONNECT` 全程加密透传。
+7. **日志已清洗**。文本模式下字段值中的换行/控制字符会被转义，无法通过用户名等输入伪造整行日志；日志文件权限为 `0640`。
+8. **容器以非 root 运行**（uid 10001），只装 `ca-certificates`；如需监听 1024 以下端口请用 `--cap-add=NET_BIND_SERVICE` 或改用高位端口。
+9. **建议再叠一层运行时约束**。镜像本身已用非 root，但 Docker 默认仍允许提权到 setuid 程序，建议启动时补上下面三个参数（实测镜像在非 root 下 `CapEff` 已为 0，再加这些参数可进一步封死提权与落盘）：
    ```bash
    docker run -d --name ssh-tunnel \
      --security-opt no-new-privileges \
@@ -116,4 +120,5 @@ curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
 - [X] 强制走隧道域名配置(`-force-domain`)，用于抵消直连规则的误伤（如 `geosite:cn` 收录 `googleapis.cn` 导致 Google Play 更新失效）
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口
 - [X] 周期性运行统计日志（每 5 分钟输出活跃/累计连接数与上下行字节），逐连接日志可用 `LOG_LEVEL=debug` 打开
+- [X] 并发连接双维度上限（全局 256 / 单 IP 32，SOCKS5 与 HTTP 共享配额），超限直接关闭；转发缓冲改用 `sync.Pool` 复用，避免高并发下内存线性增长
 - [X] SSH 会话重连指数退避（5s 起、60s 封顶，按槽位错开），服务器不可用时避免无效握手风暴与日志刷屏
