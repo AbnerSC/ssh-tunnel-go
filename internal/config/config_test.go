@@ -1,7 +1,10 @@
 package config
 
 import (
+	"strings"
 	"testing"
+
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
 )
 
 // clearEnv 把所有支持的环境变量置空，避免宿主环境干扰测试。
@@ -10,6 +13,7 @@ func clearEnv(t *testing.T) {
 	for _, key := range []string{
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
 		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC", "ALLOW_PUBLIC_FORWARD",
+		"MAX_CONNS", "MAX_CONNS_PER_IP",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
@@ -367,6 +371,49 @@ func TestLoadRejectsInvalidPublicForwardValue(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsForwardWithoutServer -L/-R 只能经 SSH 会话转发：
+// 没配服务器时规则无处安放，必须启动即报错（否则进程会以 0 退出，看起来像部署成功）。
+func TestLoadRejectsForwardWithoutServer(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"仅 -L", []string{"-L", "127.0.0.1:3306-13306"}, "-L 1 条"},
+		{"-s 别名", []string{"-s", "127.0.0.1:3306-13306"}, "-L 1 条"},
+		{"仅 -R", []string{"-R", "127.0.0.1:80-8080"}, "-R 1 条"},
+		{"-L 与 -R", []string{"-L", "127.0.0.1:3306-13306", "-L", "127.0.0.1:3307-13307", "-R", "127.0.0.1:80-8080"}, "-L 2 条、-R 1 条"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			_, err := Load(NewResolver(c.args))
+			if err == nil {
+				t.Fatalf("%s 缺少 SSH 服务器时应报错", c.name)
+			}
+			if !strings.Contains(err.Error(), "SSH_SERVER") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("报错信息应包含 %q 并提示 SSH_SERVER，实际: %v", c.want, err)
+			}
+		})
+	}
+
+	// 对照组：配好服务器后同样的规则应能通过，避免上面的校验错杀正常配置
+	t.Run("有服务器则通过", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("SSH_SERVER", "root@1.2.3.4")
+		t.Setenv("SSH_PASSWORD", "x")
+		// -L 监听无认证，非回环地址默认被拒；这里只验证「有服务器则不报缺服务器」
+		t.Setenv("BIND_ADDR", "127.0.0.1")
+		cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306", "-R", "127.0.0.1:80-8080"}))
+		if err != nil {
+			t.Fatalf("配了服务器时不应报错: %v", err)
+		}
+		if cfg.SSH == nil || len(cfg.SSH.Locals) != 1 || len(cfg.SSH.Remotes) != 1 {
+			t.Fatalf("转发规则未落到配置上: %+v", cfg.SSH)
+		}
+	})
+}
+
 // TestLoadParsesHostKeyOptions 主机密钥校验相关配置应能通过参数与环境变量传入。
 func TestLoadParsesHostKeyOptions(t *testing.T) {
 	clearEnv(t)
@@ -382,5 +429,93 @@ func TestLoadParsesHostKeyOptions(t *testing.T) {
 	}
 	if len(cfg.SSH.HostKeys) != 2 {
 		t.Fatalf("SSH_HOST_KEY 应支持多个值: %+v", cfg.SSH.HostKeys)
+	}
+}
+
+// enableProxy 打开一个带认证的 socks5 端口，便于验证代理相关配置。
+func enableProxy(t *testing.T) {
+	t.Helper()
+	t.Setenv("SOCKS_PORT", "1080")
+	t.Setenv("SOCKS_USER", "u")
+	t.Setenv("SOCKS_PASSWORD", "p")
+}
+
+// TestLoadConnectionLimitsDefault 未配置时沿用 proxy 包内置默认上限，
+// 避免配置层与限制器各写一份数字、后续只改一处而失效。
+func TestLoadConnectionLimitsDefault(t *testing.T) {
+	clearEnv(t)
+	enableProxy(t)
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.MaxConns != proxy.DefaultMaxConns || cfg.MaxConnsPerIP != proxy.DefaultMaxConnsPerIP {
+		t.Fatalf("默认上限错误: total=%d perIP=%d", cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
+}
+
+// TestLoadConnectionLimitsFromEnv 环境变量可覆盖并发连接上限，
+// 且优先于命令行参数（与其它配置项一致）。
+func TestLoadConnectionLimitsFromEnv(t *testing.T) {
+	clearEnv(t)
+	enableProxy(t)
+	t.Setenv("MAX_CONNS", "64")
+	t.Setenv("MAX_CONNS_PER_IP", "8")
+	cfg, err := Load(NewResolver([]string{"-max-conns", "128", "-max-conns-per-ip", "16"}))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.MaxConns != 64 || cfg.MaxConnsPerIP != 8 {
+		t.Fatalf("环境变量应优先: total=%d perIP=%d", cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
+}
+
+// TestLoadConnectionLimitsFromArgs 只传参数时同样生效。
+func TestLoadConnectionLimitsFromArgs(t *testing.T) {
+	clearEnv(t)
+	enableProxy(t)
+	cfg, err := Load(NewResolver([]string{"-max-conns", "128", "-max-conns-per-ip", "16"}))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.MaxConns != 128 || cfg.MaxConnsPerIP != 16 {
+		t.Fatalf("参数未生效: total=%d perIP=%d", cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
+}
+
+// TestLoadConnectionLimitsUnlimited 0 表示不限制，不能当成非法配置拒绝启动。
+func TestLoadConnectionLimitsUnlimited(t *testing.T) {
+	clearEnv(t)
+	enableProxy(t)
+	t.Setenv("MAX_CONNS", "0")
+	t.Setenv("MAX_CONNS_PER_IP", "0")
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("0 应表示不限制: %v", err)
+	}
+	if cfg.MaxConns != 0 || cfg.MaxConnsPerIP != 0 {
+		t.Fatalf("上限应为 0: total=%d perIP=%d", cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
+}
+
+// TestLoadRejectsInvalidConnectionLimits 非法上限在启动时就报错，
+// 而不是等到运行期才发现限制没生效。
+func TestLoadRejectsInvalidConnectionLimits(t *testing.T) {
+	cases := []struct{ name, total, perIP string }{
+		{"全局为负", "-1", "4"},
+		{"每IP为负", "16", "-2"},
+		{"每IP大于全局", "4", "8"},
+		{"非数字", "abc", "1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			enableProxy(t)
+			t.Setenv("MAX_CONNS", c.total)
+			t.Setenv("MAX_CONNS_PER_IP", c.perIP)
+			if _, err := Load(NewResolver(nil)); err == nil {
+				t.Fatalf("应报错: MAX_CONNS=%s MAX_CONNS_PER_IP=%s", c.total, c.perIP)
+			}
+		})
 	}
 }

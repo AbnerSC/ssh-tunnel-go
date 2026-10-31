@@ -205,14 +205,68 @@ func TestServeRejectsBeyondLimit(t *testing.T) {
 // TestDefaultLimitMatchesMemoryBudget 默认上限必须与内存预算匹配：
 // 转发阶段每个连接占用两向 relayBufSize 缓冲，上限过高会让小内存容器被 OOM。
 func TestDefaultLimitMatchesMemoryBudget(t *testing.T) {
-	if maxConnsPerIP <= 0 || maxConnsPerIP >= maxConns {
-		t.Fatalf("每 IP 上限必须大于 0 且小于全局上限: perIP=%d total=%d", maxConnsPerIP, maxConns)
+	if DefaultMaxConnsPerIP <= 0 || DefaultMaxConnsPerIP >= DefaultMaxConns {
+		t.Fatalf("每 IP 上限必须大于 0 且小于全局上限: perIP=%d total=%d", DefaultMaxConnsPerIP, DefaultMaxConns)
 	}
-	budget := int64(maxConns) * 2 * relayBufSize
+	budget := int64(DefaultMaxConns) * 2 * relayBufSize
 	if budget > 96<<20 {
 		t.Fatalf("全局上限对应缓冲占用 %d MiB，超出 96MiB 预算", budget>>20)
 	}
-	if defaultLimiter.maxTotal != maxConns || defaultLimiter.maxPerIP != maxConnsPerIP {
-		t.Fatal("defaultLimiter 未按默认参数初始化")
+	// 默认限制器在包初始化时就按默认值建好，未显式设置时即以此为生效值
+	if lim := defaultLimiter.Load(); lim.maxTotal != DefaultMaxConns || lim.maxPerIP != DefaultMaxConnsPerIP {
+		t.Fatalf("默认限制器未按默认参数初始化: total=%d perIP=%d", lim.maxTotal, lim.maxPerIP)
+	}
+}
+
+// TestSetConnectionLimits SetConnectionLimits 应替换全局限制器，0 表示不限制。
+func TestSetConnectionLimits(t *testing.T) {
+	orig := defaultLimiter.Load()
+	t.Cleanup(func() { defaultLimiter.Store(orig) })
+
+	SetConnectionLimits(9, 4)
+	lim := currentLimiter()
+	if lim.maxTotal != 9 || lim.maxPerIP != 4 {
+		t.Fatalf("上限未生效: total=%d perIP=%d", lim.maxTotal, lim.maxPerIP)
+	}
+
+	// 0 交给 connLimiter 解释为不限制
+	SetConnectionLimits(0, 0)
+	if lim := currentLimiter(); lim.maxTotal != 0 || lim.maxPerIP != 0 {
+		t.Fatalf("0 应表示不限制: total=%d perIP=%d", lim.maxTotal, lim.maxPerIP)
+	}
+}
+
+// TestServeUsesGlobalLimiter Serve 应绑定启动时的全局限制器，
+// 从而让 main 里 SetConnectionLimits 的设置真正作用于两个代理端口。
+func TestServeUsesGlobalLimiter(t *testing.T) {
+	orig := defaultLimiter.Load()
+	t.Cleanup(func() { defaultLimiter.Store(orig) })
+	SetConnectionLimits(1, 1)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	hold := make(chan struct{})
+	go Serve(ln, "test", func(net.Conn) { <-hold })
+	t.Cleanup(func() {
+		close(hold)
+		_ = ln.Close()
+	})
+
+	first, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("建立首个连接失败: %v", err)
+	}
+	defer first.Close()
+
+	second, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("建立超限连接失败: %v", err)
+	}
+	defer second.Close()
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("全局上限为 1 时，第二个连接应被拒绝")
 	}
 }

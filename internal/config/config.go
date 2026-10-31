@@ -9,6 +9,7 @@ import (
 	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/console"
 	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/direct"
 	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
 )
 
 // envLookup 便于测试替换。
@@ -50,8 +51,13 @@ type Config struct {
 	// AllowPublicForward 允许 -L 本地转发端口在非回环地址上监听。
 	// 转发端口本身没有任何认证，默认与代理端口同一策略：非回环即拒绝启动
 	AllowPublicForward bool
-	SSH                *SSHConfig
-	Direct             *direct.Rules
+	// MaxConns 代理并发连接上限；0 表示不限制。
+	// 未配置时取 proxy 包内置默认值，避免两边各写一份数字后续失效
+	MaxConns int
+	// MaxConnsPerIP 单来源 IP 的并发连接上限；0 表示不限制
+	MaxConnsPerIP int
+	SSH           *SSHConfig
+	Direct        *direct.Rules
 }
 
 // CheckWork 是否存在可执行任务。
@@ -107,6 +113,22 @@ func Load(r *Resolver) (*Config, error) {
 	if cfg.AllowPublicForward, err = r.Bool("-allow-public-forward", "ALLOW_PUBLIC_FORWARD", false); err != nil {
 		return nil, err
 	}
+	// 并发连接上限：两个维度都允许用 0 显式关闭（需自行确保内存足够）
+	if cfg.MaxConns, err = r.Int("-max-conns", "MAX_CONNS", proxy.DefaultMaxConns); err != nil {
+		return nil, err
+	}
+	if cfg.MaxConnsPerIP, err = r.Int("-max-conns-per-ip", "MAX_CONNS_PER_IP", proxy.DefaultMaxConnsPerIP); err != nil {
+		return nil, err
+	}
+	if cfg.MaxConns < 0 || cfg.MaxConnsPerIP < 0 {
+		return nil, fmt.Errorf("并发连接上限不能为负数（0 表示不限制）: MAX_CONNS=%d MAX_CONNS_PER_IP=%d",
+			cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
+	// 每 IP 上限大于全局上限时该维度失去意义，属于配置错误
+	if cfg.MaxConns > 0 && cfg.MaxConnsPerIP > cfg.MaxConns {
+		return nil, fmt.Errorf("单 IP 并发连接上限不能大于全局上限: MAX_CONNS=%d MAX_CONNS_PER_IP=%d",
+			cfg.MaxConns, cfg.MaxConnsPerIP)
+	}
 
 	// 账号密码必须成对出现：只配一半时如果静默当作「不启用认证」，
 	// 代理会变成对任何人都开放的内网跳板（巡检时实测只需 SOCKS_USER 一个变量即可绕过认证）
@@ -128,6 +150,11 @@ func Load(r *Resolver) (*Config, error) {
 		} else {
 			logging.Warn("config", "http代理无授权认证", "bind", bindDesc(cfg.BindAddr))
 		}
+	}
+	if cfg.SocksPort > 0 || cfg.HTTPPort > 0 {
+		logging.Info("config", "并发连接上限",
+			"maxTotal", cfg.MaxConns, "maxPerIP", cfg.MaxConnsPerIP,
+			"hint", "0 表示不限制，可用 MAX_CONNS / MAX_CONNS_PER_IP 调整")
 	}
 
 	// 无认证 + 对外监听 = 开放代理/内网跳板，默认拒绝启动；
@@ -173,6 +200,14 @@ func Load(r *Resolver) (*Config, error) {
 		serverHost = console.Fill("请输入服务器地址:", serverHost, false)
 		serverUser = console.Fill("请输入服务器账号:", serverUser, false)
 		serverPassword = console.Fill("请输入服务器密码:", serverPassword, true)
+		// -L/-R 只能经 SSH 会话转发：没有服务器时这些规则无处安放。
+		// 若静默忽略，进程还会以 0 退出（CheckWork 只看 cfg.SSH 下的规则），
+		// 运维会误以为部署成功，因此直接拒绝启动。
+		if strings.TrimSpace(serverHost) == "" && (len(locals) > 0 || len(remotes) > 0) {
+			return nil, fmt.Errorf("已配置 %s 端口转发，但缺少 SSH 服务器：-L/-R 只能经 SSH 会话转发，"+
+				"没有服务器时这些规则无法生效：请配置 SSH_SERVER（如 root@1.2.3.4）与 SSH_PASSWORD，"+
+				"或去掉这些转发参数", forwardCountDesc(len(locals), len(remotes)))
+		}
 		logging.Info("config", "SSH服务器信息", "user", serverUser, "host", serverHost, "port", sshPort)
 	}
 
@@ -284,6 +319,18 @@ func readScript(r *Resolver, flags ...string) ([]CopyItem, error) {
 		}
 	}
 	return out, nil
+}
+
+// forwardCountDesc 生成「-L 1 条、-R 2 条」形式的转发规则描述，用于报错信息。
+func forwardCountDesc(locals, remotes int) string {
+	var parts []string
+	if locals > 0 {
+		parts = append(parts, fmt.Sprintf("-L %d 条", locals))
+	}
+	if remotes > 0 {
+		parts = append(parts, fmt.Sprintf("-R %d 条", remotes))
+	}
+	return strings.Join(parts, "、")
 }
 
 // readGeoSiteNames 读取 -direct-cn 的 geosite 列表名：

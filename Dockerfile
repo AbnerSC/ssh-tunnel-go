@@ -123,6 +123,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 #   BIND_ADDR      -> -bind          代理与 -L 端口的监听地址（默认 0.0.0.0）
 #   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
 #   ALLOW_PUBLIC_FORWARD -> -allow-public-forward 允许无认证的 -L 转发端口对外监听（默认拒绝）
+#   MAX_CONNS      -> -max-conns      代理并发连接上限（默认 256，0 表示不限制）
+#   MAX_CONNS_PER_IP -> -max-conns-per-ip 单来源 IP 并发连接上限（默认 32，0 表示不限制）
 #   SSH_KNOWN_HOSTS -> -known-hosts  服务端主机密钥记录文件（默认 /app/known_hosts）
 #   SSH_HOST_KEY    -> -host-key     固定服务端主机密钥指纹（SHA256:...，可逗号分隔多个）
 #   JAVA_OPTS      -> Java 版遗留变量，Go 版接受但忽略
@@ -133,6 +135,8 @@ ENV SOCKS_PORT= \
     BIND_ADDR= \
     ALLOW_UNAUTH_PUBLIC= \
     ALLOW_PUBLIC_FORWARD= \
+    MAX_CONNS= \
+    MAX_CONNS_PER_IP= \
     SSH_SERVER= \
     SSH_PORT= \
     SSH_PASSWORD= \

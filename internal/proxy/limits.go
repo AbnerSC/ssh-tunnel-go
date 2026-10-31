@@ -3,6 +3,7 @@ package proxy
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,17 +14,38 @@ import (
 // 吃掉内存；进入转发阶段后每连接还要占两向 relayBufSize 缓冲。
 // 这里按「进程总量」与「单来源 IP」双维度设上限，超限的连接直接关闭。
 const (
-	// maxConns 进程内同时处理的客户端连接数上限。
-	// 按转发阶段每连接约 256KB（两向 relayBufSize）估算，256 条约 64MB，
-	// 与 README 示例的 mem_limit=128m 相匹配
-	maxConns = 256
-	// maxConnsPerIP 单个来源 IP 的同时连接上限，挡住单机发起的连接洪泛。
-	// 取值需低于 maxConns，否则多台客户端可以把全局配额吃光
-	maxConnsPerIP = 32
+	// DefaultMaxConns 默认的进程内并发连接上限。
+	// 按转发阶段每连接约 256KB（两向 relayBufSize）估算，默认值约 64MB，
+	// 与 README 示例的 mem_limit=128m 相匹配；可用 MAX_CONNS 覆盖
+	DefaultMaxConns = 256
+	// DefaultMaxConnsPerIP 默认的单来源 IP 并发连接上限，挡住单机发起的连接洪泛。
+	// 必须小于全局上限，否则单个 IP 就能把全局配额吃光；可用 MAX_CONNS_PER_IP 覆盖
+	DefaultMaxConnsPerIP = 32
 	// rejectLogInterval 连接被拒日志的最小输出间隔：
 	// 洪泛期间每次拒绝都写日志，反而会用日志把磁盘打满
 	rejectLogInterval = time.Second
 )
+
+// defaultLimiter 全进程共用的限制器，Serve 启动监听时绑定它的当前值。
+//
+// 用原子指针而不是普通变量：SetConnectionLimits 可能在监听协程运行后
+// 被调用（测试或未来的热更新），普通变量会与其竞争。
+var defaultLimiter atomic.Pointer[connLimiter]
+
+func init() {
+	defaultLimiter.Store(newConnLimiter(DefaultMaxConns, DefaultMaxConnsPerIP))
+}
+
+// currentLimiter 返回当前生效的限制器。
+func currentLimiter() *connLimiter { return defaultLimiter.Load() }
+
+// SetConnectionLimits 设置全局与每来源 IP 的并发连接上限；小于等于 0 表示该维度不限制。
+//
+// 必须在启动监听之前调用：Serve 在启动时取一次限制器并长期使用，
+// 之后再调用只影响之后启动的监听。
+func SetConnectionLimits(maxTotal, maxPerIP int) {
+	defaultLimiter.Store(newConnLimiter(maxTotal, maxPerIP))
+}
 
 // connLimiter 全局 + 每来源 IP 的并发连接限制。
 //

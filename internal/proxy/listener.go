@@ -23,18 +23,15 @@ func ListenTCPOn(addr string, port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
 }
 
-// defaultLimiter 全进程共用的连接限制器。
-//
-// SOCKS5 与 HTTP 代理必须共享同一份配额：各自持有限制器时，
-// 攻击者只要同时打两个端口就能拿到双倍上限。
-var defaultLimiter = newConnLimiter(maxConns, maxConnsPerIP)
-
 // Serve 接受连接并逐连接并发处理。
+//
+// SOCKS5 与 HTTP 代理必须共用同一个限制器（见 currentLimiter）：各自持有一份时，
+// 攻击者只要同时打两个端口就能拿到双倍上限。
 //
 // 单连接处理中发生 panic 只影响该连接：代理直接面对不可信输入，
 // 不能让一条畸形请求终止整个进程。
 func Serve(ln net.Listener, component string, handler func(net.Conn)) {
-	serve(ln, component, handler, defaultLimiter)
+	serve(ln, component, handler, currentLimiter())
 }
 
 // serve 使用指定的限制器接受连接，便于测试注入小额上限。

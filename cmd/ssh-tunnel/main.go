@@ -180,6 +180,9 @@ func run(ctx context.Context, args []string) int {
 		return 0
 	}
 
+	// 并发连接上限必须在启动监听之前生效：Serve 只会在启动时取一次限制器
+	proxy.SetConnectionLimits(cfg.MaxConns, cfg.MaxConnsPerIP)
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
