@@ -131,6 +131,19 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
 ```
 
+### Java 生态客户端兼容（Nexus 3 / Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
+
+Java 侧主流 HttpClient 默认走 RFC 7235 的质询–重试流，与 curl/libcurl 的“预先带凭据”不同，本代理已针对该差异做专门处理：
+
+- **首请求不带 `Proxy-Authorization` 不计入爆破失败**。Nexus 3 使用 `PoolingHttpClientConnectionManager` 并发抓 Maven Central / Docker Hub，一分钟同一来源很容易累积 10+ 条质询探测，旧实现会把它当爆破直接封禁 5 分钟，日志持续刷「`http代理认证不通过`」。
+- **带正文的 407 强制 `Connection: close`**。Apache HttpClient / Jetty client 在 POST/PUT 下默认不启用 `Expect: 100-continue`，正文会跟请求头一起先到达代理；此时若在同一连接上回 407，客户端重试的新请求与代理未消费的旧正文会串包，表现为目标侧 `400 Bad Request` 或参数错位。无正文的 CONNECT / GET / HEAD 仍在同连接上重试，不额外开 TCP。
+- **`Proxy-Authenticate` 声明 `charset="UTF-8"`**。Apache HttpClient 4.x 的 `BasicScheme` 没收到 `charset` 参数时按 ISO-8859-1 编码凭据，与本代理比较用的 UTF-8 字节不兼容，密码含非 ASCII 时永远匹配失败。
+- **方案名与凭据之间的空白字符容忍制表符与多重空格**（兼容部分老 Jetty client 手拼头时的 `Basic\t...` 形式）。
+- **需关连接的 407 走优雅关闭**（先 `FIN` 再有界排空残留字节），避免接收队列里未读完的正文让 `close()` 发 `RST`、把刚发出的 407 冲掉——否则 Java 客户端看到的是 `Connection reset` 而不是 `407`，不会触发重试。
+- **每连接质询次数封顶**（默认 5 轮）。缺失凭据不计数后，单连接可能被用来无限拿 407 空转占坑，用连接级上限补回旧实现由限速器提供的隐式上界；正常客户端 1 轮即完成重试，不受影响。
+
+Nexus 3 侧只需在 `System → HTTP Proxy Settings` 里勾选 `Enable HTTP Authentication` 并填写 `SOCKS_USER` / `SOCKS_PASSWORD`，无需预先启用 preemptive auth，也不依赖任何 Nexus 侧适配。
+
 ### 功能特性
 - [X] 通过远程SSH代理建立隧道
 - [X] 支持SOCKS5代理
@@ -144,3 +157,12 @@ curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
 - [X] 周期性运行统计日志（每 5 分钟输出活跃/累计连接数与上下行字节），逐连接日志可用 `LOG_LEVEL=debug` 打开
 - [X] 并发连接双维度上限（默认全局 256 / 单 IP 32，SOCKS5 与 HTTP 共享配额，可用 `MAX_CONNS` / `MAX_CONNS_PER_IP` 调整，`0` 表示不限制），超限直接关闭；转发缓冲改用 `sync.Pool` 复用，避免高并发下内存线性增长
 - [X] SSH 会话重连指数退避（5s 起、60s 封顶，按槽位错开），服务器不可用时避免无效握手风暴与日志刷屏
+- [X] HTTP 代理兼容 Java 生态客户端（Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
+
+### 兼容性实测
+- [X] v2rayN
+- [X] v2rayNG
+- [X] Google Play
+- [X] Gitea
+- [X] Linux（OpenEuler）
+- [X] Nexus3

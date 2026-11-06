@@ -157,7 +157,7 @@ func TestHTTPEmptyHeadIsBadRequest(t *testing.T) {
 	defer client.Close()
 	go func() {
 		defer server.Close()
-		handleHTTPRequest(server, bufio.NewReader(server), nil, Credentials{}, directRoute("http"), nil)
+		handleHTTPRequest(server, bufio.NewReader(server), nil, Credentials{}, directRoute("http"), nil, new(int))
 	}()
 
 	br := bufio.NewReader(client)
@@ -566,6 +566,316 @@ func TestCheckBasicAuth(t *testing.T) {
 	for header, want := range cases {
 		if got := checkBasicAuth(header, creds); got != want {
 			t.Fatalf("checkBasicAuth(%q) = %v, want %v", header, got, want)
+		}
+	}
+}
+
+// --- Jetty / Apache HttpClient（Nexus 3 使用的客户端族）兼容性回归 ---
+
+// TestHTTPProxyAuthenticateAdvertisesCharsetUTF8 校验 407 应答声明 charset="UTF-8"。
+//
+// Apache HttpClient 4.x 的 BasicScheme 在没有 charset 参数时按 ISO-8859-1 编码
+// 凭据，本代理按 UTF-8 原始字节比较，密码含非 ASCII 字符时永远对不上。
+func TestHTTPProxyAuthenticateAdvertisesCharsetUTF8(t *testing.T) {
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+
+	writeConn(t, conn, []byte("CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n"))
+	head := readHead(t, br)
+	if !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+		t.Fatalf("应返回 407: %q", head)
+	}
+	if !strings.Contains(head, `charset="UTF-8"`) {
+		t.Fatalf("Proxy-Authenticate 应声明 UTF-8 charset: %q", head)
+	}
+}
+
+// TestHTTPBasicAuthUnicodePassword UTF-8 密码在声明 charset="UTF-8" 后能被
+// Apache HttpClient 正确编码并通过校验（此前会因 ISO-8859-1 编码不一致失败）。
+func TestHTTPBasicAuthUnicodePassword(t *testing.T) {
+	echoHost, echoPort := startEchoServer(t)
+	user, pass := "nexus-admin", "päss中"
+	creds := NewCredentials(user, pass)
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+	target := fmt.Sprintf("%s:%d", echoHost, echoPort)
+
+	// 客户端按 UTF-8 生成凭据（对应 charset="UTF-8" 的语义）
+	req := "CONNECT " + target + " HTTP/1.1\r\nProxy-Authorization: " +
+		basicAuth(user, pass) + "\r\n\r\n"
+	writeConn(t, conn, []byte(req))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 200 ") {
+		t.Fatalf("UTF-8 密码应通过认证: %q", head)
+	}
+
+	// ISO-8859-1 编码的同一份凭据必须失败——保证 charset 声明真的生效而非
+	// 退化成任意字节都能通过（避免误把不匹配放成匹配）
+	conn2, br2 := dialProxy(t, addr)
+	latin := encodeLatin1(user + ":" + pass)
+	req2 := "CONNECT " + target + " HTTP/1.1\r\nProxy-Authorization: Basic " + latin +
+		"\r\n\r\n"
+	writeConn(t, conn2, []byte(req2))
+	if head := readHead(t, br2); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+		t.Fatalf("ISO-8859-1 编码的 UTF-8 密码不应通过: %q", head)
+	}
+}
+
+// encodeLatin1 按 ISO-8859-1 语义把字符串逐字符压到单字节再做 base64，
+// 复现 Apache HttpClient 未收到 charset 参数时的凭据序列化行为。
+// 超出 0xFF 的字符按 Java CharsetEncoder 的默认替换策略处理成 '?'。
+func encodeLatin1(s string) string {
+	b := make([]byte, 0, len(s))
+	for _, r := range s {
+		if r <= 0xFF {
+			b = append(b, byte(r))
+		} else {
+			b = append(b, '?')
+		}
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// TestHTTPReactiveAuthMissingHeaderNotBanned 复现 Nexus 3 侧最常见的场景：一批连接
+// 每条首请求都不带 Proxy-Authorization（Apache HttpClient 的质询探测），且这些连接
+// 随后被客户端直接丢弃（尚未走到带凭据的重试）。
+//
+// 关键：阶段一不做「成功重试」，避免 guard.Reset 把计数清零掩盖问题——
+// 修复前把「没带凭据」也算作爆破失败，30 条连接必然累积到 10 次阈值并封禁来源，
+// 末尾 Blocked 断言在旧实现下必然失败（旧行为回归可被捕获）。
+func TestHTTPReactiveAuthMissingHeaderNotBanned(t *testing.T) {
+	echoHost, echoPort := startEchoServer(t)
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	target := fmt.Sprintf("%s:%d", echoHost, echoPort)
+
+	const n = authFailLimit * 3
+	for i := 0; i < n; i++ {
+		conn, br := dialProxy(t, addr)
+		// 只发不带凭据的首请求：应收到 407；不重试、不触发 Reset
+		writeConn(t, conn, []byte("CONNECT "+target+" HTTP/1.1\r\n\r\n"))
+		if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+			t.Fatalf("第 %d 条连接首请求应收到 407: %q", i+1, head)
+		}
+		_ = conn.Close()
+	}
+
+	// 走完质询探测后来源仍处于「未封禁」状态
+	if creds.guard.Blocked(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}) {
+		t.Fatal("reactive 认证的首请求不应触发封禁")
+	}
+
+	// 随后正常带凭据的请求应无障碍通过
+	conn, br := dialProxy(t, addr)
+	req := "CONNECT " + target + " HTTP/1.1\r\nProxy-Authorization: " +
+		basicAuth("user", "pwd123") + "\r\n\r\n"
+	writeConn(t, conn, []byte(req))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 200 ") {
+		t.Fatalf("质询探测后带凭据请求应通过: %q", head)
+	}
+	_ = conn.Close()
+}
+
+// TestHTTPPerConnChallengeCap 同一条连接反复只发无凭据请求时，超过每连接质询上限
+// 后必须关连接，防止「无凭据不计数」被用来在同一连接上无限拿 407 空转占坑。
+func TestHTTPPerConnChallengeCap(t *testing.T) {
+	echoHost, echoPort := startEchoServer(t)
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	target := fmt.Sprintf("%s:%d", echoHost, echoPort)
+
+	conn, br := dialProxy(t, addr)
+	for i := 0; i < httpMaxChallengesPerConn; i++ {
+		writeConn(t, conn, []byte("CONNECT "+target+" HTTP/1.1\r\n\r\n"))
+		if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+			t.Fatalf("第 %d 次质询应收到 407: %q", i+1, head)
+		}
+	}
+	// 达到上限后连接应被关闭，无法继续在同一连接上空转
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("超过每连接质询上限后应断开连接")
+	}
+}
+
+// TestHTTPForwardPostBodyReactiveAuthClosesConnection POST 带正文 + 首请求未带凭据时，
+// 407 必须携带 Connection: close，避免客户端的重试请求与已发出的正文在同一连接上串包。
+func TestHTTPForwardPostBodyReactiveAuthClosesConnection(t *testing.T) {
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+
+	req := "POST http://127.0.0.1:1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+		"Content-Length: 3\r\n\r\nabc"
+	writeConn(t, conn, []byte(req))
+	head := readHead(t, br)
+	if !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+		t.Fatalf("POST 未带凭据应回 407: %q", head)
+	}
+	if !strings.Contains(strings.ToLower(head), "connection: close") {
+		t.Fatalf("带正文的 407 必须显式关闭连接: %q", head)
+	}
+	// close 变体同样要声明 charset（与 keep-alive 变体一致，否则含非 ASCII 密码仍不匹配）
+	if !strings.Contains(head, `charset="UTF-8"`) {
+		t.Fatalf("close 变体的 Proxy-Authenticate 也应声明 UTF-8: %q", head)
+	}
+}
+
+// TestHTTPForwardPostBodyReactiveAuthFullFlow 复现 Apache HttpClient 处理 POST 上传的完整流：
+// 第一次 TCP 连接不带凭据 → 407+close；第二次 TCP 连接带凭据 → 转发到目标。
+func TestHTTPForwardPostBodyReactiveAuthFullFlow(t *testing.T) {
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动目标服务失败: %v", err)
+	}
+	t.Cleanup(func() { _ = targetLn.Close() })
+	targetPort := targetLn.Addr().(*net.TCPAddr).Port
+
+	done := make(chan string, 1)
+	go func() {
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		br := bufio.NewReader(conn)
+		var sb strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			sb.WriteString(line)
+			if line == "\r\n" {
+				break
+			}
+		}
+		body := make([]byte, 5)
+		if _, err := io.ReadFull(br, body); err == nil {
+			sb.Write(body)
+		}
+		done <- sb.String()
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	}()
+
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+
+	// 第一条连接：不带凭据的 POST，收到 407+close
+	c1, b1 := dialProxy(t, addr)
+	writeConn(t, c1, []byte("POST http://127.0.0.1:"+fmt.Sprint(targetPort)+"/up HTTP/1.1\r\n"+
+		"Host: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello"))
+	head := readHead(t, b1)
+	if !strings.HasPrefix(head, "HTTP/1.1 407 ") || !strings.Contains(strings.ToLower(head), "connection: close") {
+		t.Fatalf("首请求应收到 407+close: %q", head)
+	}
+	_ = c1.Close()
+
+	// 第二条连接：带凭据重试
+	c2, b2 := dialProxy(t, addr)
+	writeConn(t, c2, []byte("POST http://127.0.0.1:"+fmt.Sprint(targetPort)+"/up HTTP/1.1\r\n"+
+		"Host: 127.0.0.1\r\nContent-Length: 5\r\nProxy-Authorization: "+basicAuth("user", "pwd123")+
+		"\r\n\r\nhello"))
+	resp, err := io.ReadAll(b2)
+	if err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	if !strings.HasPrefix(string(resp), "HTTP/1.1 200 OK") {
+		t.Fatalf("重试后应完成转发: %q", resp)
+	}
+
+	select {
+	case got := <-done:
+		if !strings.Contains(got, "hello") {
+			t.Fatalf("目标侧未收到正文: %q", got)
+		}
+		if strings.Contains(strings.ToLower(got), "proxy-authorization") {
+			t.Fatalf("Proxy-Authorization 应被剔除: %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("目标服务未收到请求")
+	}
+}
+
+// TestHTTPBasicAuthLenientWhitespace 认证方案与凭据之间出现多余空格或制表符时
+// 仍应识别（RFC 7235 只允许 SP，但 Java 生态里老 Jetty client / 手工拼装的
+// 客户端偶尔会给出 "Basic\t" 或 "Basic  " 这类形态）。
+func TestHTTPBasicAuthLenientWhitespace(t *testing.T) {
+	creds := NewCredentials("user", "pwd123")
+	b64 := base64.StdEncoding.EncodeToString([]byte("user:pwd123"))
+	cases := map[string]bool{
+		"Basic " + b64:       true,
+		"Basic  " + b64:      true,  // 双空格
+		"Basic\t" + b64:      true,  // 制表符
+		"  Basic " + b64:     true,  // 前置空白（parseHTTPHeaders 已 TrimSpace，这里覆盖直接调用）
+		"BASIC " + b64:       true,  // 大小写
+		"Basic" + b64:        false, // 缺少分隔空白
+		"Bearer " + b64:      false,
+		"BasicAuther " + b64: false,
+	}
+	for header, want := range cases {
+		if got := checkBasicAuth(header, creds); got != want {
+			t.Fatalf("checkBasicAuth(%q) = %v, want %v", header, got, want)
+		}
+	}
+}
+
+// TestHTTPConcurrentReactiveAuthNoBan 并发场景下模拟 PoolingHttpClientConnectionManager
+// 一次性发起多路 CONNECT：验证不会出现「一部分连接被误封」的时序问题。
+func TestHTTPConcurrentReactiveAuthNoBan(t *testing.T) {
+	echoHost, echoPort := startEchoServer(t)
+	creds := NewCredentials("user", "pwd123")
+	addr := startHTTPProxy(t, creds, directRoute("http"))
+	target := fmt.Sprintf("%s:%d", echoHost, echoPort)
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer conn.Close()
+			br := bufio.NewReader(conn)
+			writeReq(conn, "CONNECT "+target+" HTTP/1.1\r\n\r\n")
+			if head := readHeadOrErr(br); !strings.HasPrefix(head, "HTTP/1.1 407 ") {
+				errCh <- fmt.Errorf("首请求应收到 407: %q", head)
+				return
+			}
+			writeReq(conn, "CONNECT "+target+" HTTP/1.1\r\nProxy-Authorization: "+
+				basicAuth("user", "pwd123")+"\r\n\r\n")
+			if head := readHeadOrErr(br); !strings.HasPrefix(head, "HTTP/1.1 200 ") {
+				errCh <- fmt.Errorf("重试应通过: %q", head)
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+}
+
+func writeReq(conn net.Conn, s string) {
+	_, _ = io.WriteString(conn, s)
+}
+
+func readHeadOrErr(br *bufio.Reader) string {
+	var sb strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		sb.WriteString(line)
+		if err != nil {
+			return sb.String()
+		}
+		if line == "\r\n" {
+			return sb.String()
 		}
 	}
 }

@@ -27,6 +27,18 @@ const (
 	// 头部较大时由 readHeader 按需累积（上限 httpMaxHeaderSize），
 	// 避免高并发下每连接固定 64KB 的内存开销。
 	httpReadBuffer = 4 * 1024
+	// httpWriteTimeout 写质询/错误应答的截止时间：客户端若只写不读，
+	// 填满发送缓冲后 writeAll 会无限阻塞，长期占用连接名额与 goroutine。
+	httpWriteTimeout = 5 * time.Second
+	// httpDrainTimeout / httpMaxDrainBytes 关闭前为规避 RST 而排空残留字节的
+	// 时限与上限，避免被超大/无限正文拖住（见 writeChallengeAndClose）。
+	httpDrainTimeout  = 250 * time.Millisecond
+	httpMaxDrainBytes = 256 * 1024
+	// httpMaxChallengesPerConn 单连接上允许的 keep-alive 质询轮次上限。
+	// 缺失凭据不再计入爆破计数后，需要用它补回旧实现由 guard 提供的隐式上界：
+	// 正常 RFC 7235 客户端 1 轮质询即带凭据重试，这里留足冗余；
+	// 反复只拿 407 的连接（无凭据空转或流水线攻击）超过上限即关闭。
+	httpMaxChallengesPerConn = 5
 )
 
 var (
@@ -34,13 +46,29 @@ var (
 	errHeaderTooLarge = errors.New("http: 请求头过大")
 )
 
-// 应答报文与 Java 版逐字节保持一致（ISO-8859-1 编码即原始字节）
+// 应答报文与 Java 版逐字节保持一致（ISO-8859-1 编码即原始字节）。
+//
+// 407 分成两种：
+//   - replyAuthRequired：不带 Connection: close，客户端可在同一连接上带凭据重试
+//     （CONNECT / GET / HEAD 这类没有正文的请求走这条路径，省一次 TCP 握手）；
+//   - replyAuthRequiredClose：带 Connection: close，用于请求已经附带正文的场景，
+//     避免客户端把正文连同请求头一起写完才收到 407，代理没读完的正文残留在
+//     socket 缓冲里被当成下一个请求行（Apache HttpClient / Jetty client 的
+//     POST 上传会踩到这个坑，Nexus 3 的 mvn deploy / docker push 都是 POST/PUT）。
+//
+// Proxy-Authenticate 显式声明 charset="UTF-8"（RFC 7617）：
+// Apache HttpClient 4.x 的 BasicScheme 在没有 charset 参数时按 ISO-8859-1 编码
+// 凭据，与本代理按 UTF-8 原始字节比较的语义不一致，密码含非 ASCII 字符时永远
+// 匹配不上，用户侧表现同样是「http 代理认证不通过」。
 var (
 	replyEstablished  = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
 	replyBadGateway   = []byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	replyBadRequest   = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	authChallengeHead = "Proxy-Authenticate: Basic realm=\"ssh-tunnel\", charset=\"UTF-8\"\r\n"
 	replyAuthRequired = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
-		"Proxy-Authenticate: Basic realm=\"ssh-tunnel\"\r\nContent-Length: 0\r\n\r\n")
+		authChallengeHead + "Content-Length: 0\r\n\r\n")
+	replyAuthRequiredClose = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
+		authChallengeHead + "Content-Length: 0\r\nConnection: close\r\n\r\n")
 )
 
 // ServeHTTP 启动 HTTP 代理服务。
@@ -60,13 +88,18 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 	logging.Debug("http", "http代理收到连接请求", "remote", remote)
 
 	br := bufio.NewReaderSize(conn, httpReadBuffer)
+	// challenges 统计本连接上已发出的 keep-alive 质询轮次，用于封顶（见 handleHTTPRequest）。
+	challenges := 0
 	for {
 		// 封禁拦截放在读请求之前：已处于封禁期的来源连一个请求也不处理。
 		// 仅在认证失败分支里检查是不够的——封禁期内携带正确凭据仍能通过，
 		// 且每次新连接都能再试一次，爆破速率并没有真正被压下去。
 		if creds.Enabled && creds.guard.Blocked(remote) {
 			logging.Warn("http", "来源处于认证封禁期，已断开", "remote", remote)
-			_ = writeAll(conn, replyAuthRequired)
+			// 本分支紧接着 return 、defer 会关连接，应答必须声明 Connection: close，
+			// 并走优雅关闭避免 RST 丢掉刚发出的 407（否则 Apache / Jetty HttpClient
+			// 会把它当作可复用连接重试，对端看到的却是 reset/EOF）。
+			writeChallengeAndClose(conn, replyAuthRequiredClose)
 			return
 		}
 		head, err := readHeader(conn, br)
@@ -78,7 +111,7 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 			}
 			return
 		}
-		if !handleHTTPRequest(conn, br, head, creds, route, remote) {
+		if !handleHTTPRequest(conn, br, head, creds, route, remote, &challenges) {
 			return
 		}
 	}
@@ -86,7 +119,7 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 
 // handleHTTPRequest 解析并派发单个请求，返回 true 表示继续在同一连接上读下一个请求（仅 407 场景）。
 func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Credentials, route *Route,
-	remote net.Addr) bool {
+	remote net.Addr, challenges *int) bool {
 	lines := splitHeaderLines(head)
 	// readHeader 已跳过请求行前的空行，正常不会为空；这里兜底防御，
 	// 避免畸形输入（如只有 CRLF 的连接）导致 lines[0] 越界 panic
@@ -108,17 +141,45 @@ func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Crede
 	}
 	headers := parseHTTPHeaders(lines)
 
-	// 认证：http 代理使用 Proxy-Authorization: Basic
-	if creds.Enabled && !checkBasicAuth(headers["proxy-authorization"], creds) {
-		banned := creds.guard.Fail(remote)
-		logging.Warn("http", "http代理认证不通过", "remote", remote, "banned", banned)
-		// 不携带 Connection: close：客户端可在同一连接上带凭据重试，
-		// 避免高并发下每个请求都要「新连接→407→关连接→再新连接」的双连接模式；
-		// 但来源已达封禁阀值时直接断开，否则单连接就成了无限制的爆破通道
-		_ = writeAll(conn, replyAuthRequired)
-		return !banned
-	}
+	// 认证：http 代理使用 Proxy-Authorization: Basic。
+	//
+	// 必须把「没带凭据」与「凭据不匹配」区分开——Apache HttpClient / Jetty
+	// HttpClient / java.net.http.HttpClient 默认都按 RFC 7235 的质询-重试流走：
+	// 首请求故意不带 Proxy-Authorization，收到 407 后再带凭据重试。Nexus 3 使用
+	// PoolingHttpClientConnectionManager 并发抓 Maven Central / Docker Hub，
+	// 一分钟内在同一来源 IP 上会留下十几条「不带凭据的首请求」，若一律计入
+	// 爆破失败，10 次阈值一到就把 Nexus 主机 IP 封禁 5 分钟，用户侧表现为
+	// 持续报「http代理认证不通过」。这里只在带凭据但校验失败时计入爆破计数。
 	if creds.Enabled {
+		auth := headers["proxy-authorization"]
+		if !checkBasicAuth(auth, creds) {
+			// mustClose 表示本次必须关连接（而非在同一连接上继续重试）。
+			mustClose := false
+			if auth != "" {
+				// 带凭据但校验失败：计入爆破计数，达阈值即封禁。
+				mustClose = creds.guard.Fail(remote)
+				logging.Warn("http", "http代理认证不通过", "remote", remote, "banned", mustClose)
+			} else {
+				// 未携带凭据属协议握手，不计入爆破；但也不受 guard 封顶，
+				// 用每连接质询次数上限补回隐式上界，防止单连接无限拿 407 空转占坑。
+				logging.Debug("http", "请求缺少 Proxy-Authorization，要求认证", "remote", remote)
+				*challenges++
+				if *challenges >= httpMaxChallengesPerConn {
+					logging.Debug("http", "同一连接质询次数达上限，关闭", "remote", remote)
+					mustClose = true
+				}
+			}
+			// 需要关连接，或请求带正文（正文可能已随请求头到达，不消费就会串到
+			// 下一请求）时，走优雅关闭让客户端在新连接上重试。
+			if mustClose || requestHasBody(method, lines, headers) {
+				writeChallengeAndClose(conn, replyAuthRequiredClose)
+				return false
+			}
+			if !writeChallenge(conn, replyAuthRequired) {
+				return false
+			}
+			return true
+		}
 		creds.guard.Reset(remote)
 	}
 
@@ -380,13 +441,69 @@ func hopByHopSet(connection string) map[string]struct{} {
 	return drop
 }
 
+// requestHasBody 判断请求是否可能带正文，用于决定 407 走 keep-alive 还是关连接。
+//
+// 采用保守策略：只要「读不出安全边界」就按有正文处理（关连接），因为
+// 一旦误判为无正文，未消费的字节会被当成下一个请求行，造成串包/走私。
+// 不只看 map（同名取最后会掩盖重复头），而是扫描原始行统计出现次数：
+//   - Content-Length / Transfer-Encoding 重复出现 → 无法安全切分 → 有正文；
+//   - 出现 Transfer-Encoding（含 chunked、gzip,chunked 等）→ 保守按有正文；
+//   - Content-Length 非数字或 >0 → 有正文（数字解析兼容 "0000"）；
+//   - 既无 CL 也无 TE 的 POST/PUT/PATCH 仍可能以关连接定界→ 保守按有正文。
+//
+// CONNECT / GET / HEAD 以上都不命中，返回 false（无正文，可同连接重试）。
+func requestHasBody(method string, lines []string, headers map[string]string) bool {
+	clCount, teCount := 0, 0
+	for _, line := range lines[1:] {
+		c := strings.IndexByte(line, ':')
+		if c < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(line[:c])) {
+		case "content-length":
+			clCount++
+		case "transfer-encoding":
+			teCount++
+		}
+	}
+	if clCount > 1 || teCount > 1 {
+		return true
+	}
+	if teCount > 0 {
+		return true
+	}
+	if cl := strings.TrimSpace(headers["content-length"]); cl != "" {
+		if n, err := strconv.ParseUint(cl, 10, 64); err != nil || n > 0 {
+			return true
+		}
+	}
+	switch method {
+	case "POST", "PUT", "PATCH":
+		return true
+	}
+	return false
+}
+
 // checkBasicAuth 校验 Proxy-Authorization: Basic base64(user:password)。
 // 凭据比较使用常量时间，避免响应时间差异泄露正确前缀。
+//
+// 认证方案与凭据之间按 RFC 7235 只允许 SP，但 Java 生态里偶见使用 HTAB
+// 或多空格的实现（例如某些老 Jetty client 拼装出来的头），这里一并容忍，
+// 避免合法客户端因空白字符差异被判为认证失败。
 func checkBasicAuth(header string, creds Credentials) bool {
-	if len(header) < 6 || !strings.EqualFold(header[:6], "Basic ") {
+	header = strings.TrimLeft(header, " \t")
+	if len(header) < 5 || !strings.EqualFold(header[:5], "Basic") {
 		return false
 	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(header[6:]))
+	rest := header[5:]
+	if rest == "" {
+		return false
+	}
+	// 方案名之后必须紧跟空白，避免把 "BasicAuthentication" 之类的畸形值当成凭据
+	if rest[0] != ' ' && rest[0] != '\t' {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rest))
 	if err != nil {
 		return false
 	}
@@ -460,6 +577,39 @@ func drainBuffered(br *bufio.Reader, w io.Writer) error {
 // writeAndClose 写出应答后由上层 defer 关闭连接（Java 版为 write 完成后即 close）。
 func writeAndClose(conn net.Conn, reply []byte) {
 	_ = writeAll(conn, reply)
+}
+
+// writeChallenge 发送 keep-alive 质询应答（不带 Connection: close）。
+//
+// 带写截止时间：客户端若只写不读，填满发送缓冲后 writeAll 会无限阻塞，
+// 长期占用连接名额与 goroutine（readHeader 设置的读截止时间对写不起作用）。
+// 写成功返回 true 并清除写截止时间（后续正常读写不应再带超时）；写失败返回 false。
+func writeChallenge(conn net.Conn, reply []byte) bool {
+	_ = conn.SetWriteDeadline(time.Now().Add(httpWriteTimeout))
+	err := writeAll(conn, reply)
+	if err != nil {
+		return false
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	return true
+}
+
+// writeChallengeAndClose 发送 407 应答后准备关闭连接。
+//
+// 不能直接 Close 就返回：若请求带正文，正文可能仍在内核接收队列里没读完，
+// close() 在存在未读数据时会发 RST 而非 FIN，RST 会让对端丢弃「已送达但
+// 尚未读」的响应字节——客户端于是拿到 Connection reset 而不是 407，
+// Apache/Jetty HttpClient 会把它归为 I/O 异常，不会触发 reactive 重试。
+// 这里先半关闭发出 FIN 告知响应结束，再在短窗口内有界排空残留字节，
+// 最后交给 defer conn.Close()。排空设上限与超时，避免被超大/无限正文拖住。
+func writeChallengeAndClose(conn net.Conn, reply []byte) {
+	_ = conn.SetWriteDeadline(time.Now().Add(httpWriteTimeout))
+	_ = writeAll(conn, reply)
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(httpDrainTimeout))
+	_, _ = io.Copy(io.Discard, io.LimitReader(conn, httpMaxDrainBytes))
 }
 
 // bufferedConn 让 Relay 先消费 bufio 中的残留数据，再直接读原始连接。
