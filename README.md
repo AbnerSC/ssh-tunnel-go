@@ -1,4 +1,6 @@
 # SSH隧道
+[English](./README-en.md) | **中文**
+
 通过SSH建立一个隧道
 
 [![GitHub Stars](https://img.shields.io/github/stars/AbnerSC/ssh-tunnel-go?style=flat&label=Stars)](https://github.com/AbnerSC/ssh-tunnel-go/stargazers)
@@ -89,8 +91,8 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - [X] 支持SOCKS5代理
 - [X] 支持HTTP代理
 - [X] 本机直接提供代理，不通过远程SSH代理（不配置 `-server` 即为本地代理模式）
-- [X] 增加直连IP配置(支持IP和网段)，直连IP由本地直接访问，不经过远程SSH代理（`-direct-ip`，支持 CIDR 与点分掩码）
-- [X] 增加直连域名配置(支持匹配主域名)，直连域名由本地直接访问，不经过远程SSH代理（`-direct-domain`）
+- [X] 直连IP配置(支持IP和网段)，直连IP由本地直接访问，不经过远程SSH代理（`-direct-ip`，支持 CIDR 与点分掩码）
+- [X] 直连域名配置(支持匹配主域名)，直连域名由本地直接访问，不经过远程SSH代理（`-direct-domain`）
 - [X] 内置 geosite 数据(`dlc.dat`)，`-direct-cn` 一键中国域名全量直连(也可指定其它 geosite 列表)
 - [X] 强制走隧道域名配置(`-force-domain`)，用于抵消直连规则的误伤（如 `geosite:cn` 收录 `googleapis.cn` 导致 Google Play 更新失效）
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口
@@ -100,9 +102,12 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - [X] HTTP 代理兼容 Java 生态客户端（Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
 
 ### 兼容性实测
-- [X] v2rayN
-- [X] v2rayNG
-- [X] Google Play
-- [X] Gitea
+- [X] v2rayN（Windows）
+- [X] v2rayNG（Android）
+- [X] Google Chrome
+- [X] Google Play（Android）
+- [X] Gitea（Docker环境变量）
+- [X] Nexus3（系统内配置HTTP代理）
 - [X] Linux（OpenEuler）
-- [X] Nexus3
+- [X] Windows 10/11
+- [X] Android 16
