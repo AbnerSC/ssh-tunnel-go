@@ -111,3 +111,9 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - [X] Linux（OpenEuler）
 - [X] Windows 10/11
 - [X] Android 16
+
+<p>
+<img src="docs/qrcode_qq.jpg" width="200">
+</p>
+
+> 点击链接加入群聊【AI开发新姿势】：https://qm.qq.com/q/ACxOjcQQqA
