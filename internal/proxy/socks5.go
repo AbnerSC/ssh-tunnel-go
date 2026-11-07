@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"time"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
 const (
-	// socksHandshakeTimeout 握手阶段读超时：对应 Java 版「连接后 5s 内未收到数据即关闭」，
+	// socksHandshakeTimeout 握手阶段读超时，
 	// 这里按问候、认证、请求分阶段各限时 5s（见 handleSocks5）。
 	socksHandshakeTimeout = 5 * time.Second
 	// socksAuthVersion RFC1929 账号密码认证版本号

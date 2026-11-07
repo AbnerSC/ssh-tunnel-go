@@ -6,12 +6,12 @@ import (
 	"strings"
 )
 
-// ParamFormat 复刻 Java 版参数解析语义：
+// ParamFormat 定义参数解析语义：
 //   - 以 "-" 开头的 token 视为参数名，其后首个 token 视为该参数的取值；
 //   - 同名参数重复出现时取值累积（单值读取取第一个）；
 //   - 参数名后没有取值也是合法的（仅表示该开关被打开）。
 //
-// 与 Java 版唯一的差异：多余的无归属 token 会被忽略，而不是抛空指针异常。
+// 多余的无归属 token 会被忽略，而不是抛异常。
 type ParamFormat struct {
 	values map[string][]string
 }
@@ -77,7 +77,7 @@ func (p *ParamFormat) Values(key string) []string {
 
 // Resolver 统一处理配置来源：环境变量优先，命令行参数补充。
 //
-// 与 Java 版容器入口脚本的实际效果保持一致：脚本把环境变量放在命令行参数之前，
+// 容器入口脚本把环境变量放在命令行参数之前，
 // 而单值参数取第一个出现的值，因此环境变量优先；列表参数（直连规则）两者合并。
 type Resolver struct {
 	params *ParamFormat

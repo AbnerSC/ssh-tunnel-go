@@ -20,3 +20,5 @@ coverage.out
 # IDE
 .idea/
 .vscode/
+
+/build

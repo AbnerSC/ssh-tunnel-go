@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
 var (
@@ -65,7 +65,7 @@ func (r *Rules) IsDirect(host string) bool {
 				return true
 			}
 		}
-		// IP 目标不参与域名规则匹配（与 Java 版一致）
+		// IP 目标不参与域名规则匹配
 		return false
 	}
 

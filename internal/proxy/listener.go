@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"time"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
-// ListenTCP 监听本地端口（含 IPv6 与 IPv4），与 Java 版 NetServer 一致。
+// ListenTCP 监听本地端口（含 IPv6 与 IPv4）
 func ListenTCP(port int) (net.Listener, error) {
 	return ListenTCPOn("", port)
 }

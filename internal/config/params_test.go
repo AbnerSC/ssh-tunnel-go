@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestParseParamsJavaSemantics(t *testing.T) {
+func TestParseParamsSemantics(t *testing.T) {
 	p := ParseParams([]string{"-D", "6666", "-server", "root@1.2.3.4", "-direct-cn", "-a", "1", "-a", "2"})
 
 	if !p.Contains("-D") || p.ValueOr("-D", "") != "6666" {
@@ -26,7 +26,7 @@ func TestParseParamsJavaSemantics(t *testing.T) {
 }
 
 func TestParseParamsKeyEatsSingleValue(t *testing.T) {
-	// 一个 key 只消费紧随的一个值，多余 token 忽略（Java 版会抛 NPE，此处有意容错）
+	// 一个 key 只消费紧随的一个值，多余 token 忽略（此处有意容错）
 	p := ParseParams([]string{"-D", "6666", "orphan", "-p", "22"})
 	if got := p.ValueOr("-D", ""); got != "6666" {
 		t.Fatalf("-D = %q", got)

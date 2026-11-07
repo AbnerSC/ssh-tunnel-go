@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
 const (
@@ -46,7 +46,7 @@ var (
 	errHeaderTooLarge = errors.New("http: 请求头过大")
 )
 
-// 应答报文与 Java 版逐字节保持一致（ISO-8859-1 编码即原始字节）。
+// 应答报文按 ISO-8859-1 编码（即原始字节）逐字节写出。
 //
 // 407 分成两种：
 //   - replyAuthRequired：不带 Connection: close，客户端可在同一连接上带凭据重试
@@ -80,7 +80,7 @@ func ServeHTTP(ln net.Listener, creds Credentials, route *Route) {
 
 // handleHTTP 处理单条客户端连接。
 //
-// 与 Java 版一致：认证失败回 407 但不断开连接，客户端可在同一连接上带凭据重试；
+// 认证失败回 407 但不断开连接，客户端可在同一连接上带凭据重试；
 // 其余请求（CONNECT 隧道 / 普通转发）转发结束后立即关闭连接。
 func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 	defer conn.Close()
@@ -388,7 +388,7 @@ func splitHeaderLines(head []byte) []string {
 	return lines
 }
 
-// parseHTTPHeaders 解析头部字段，key 统一小写，同名取最后一个（与 Java 版 Map.put 一致）。
+// parseHTTPHeaders 解析头部字段，key 统一小写，同名取最后一个。
 func parseHTTPHeaders(lines []string) map[string]string {
 	headers := make(map[string]string, len(lines))
 	for _, line := range lines[1:] {
@@ -574,7 +574,7 @@ func drainBuffered(br *bufio.Reader, w io.Writer) error {
 	return err
 }
 
-// writeAndClose 写出应答后由上层 defer 关闭连接（Java 版为 write 完成后即 close）。
+// writeAndClose 写出应答后由上层 defer 关闭连接。
 func writeAndClose(conn net.Conn, reply []byte) {
 	_ = writeAll(conn, reply)
 }

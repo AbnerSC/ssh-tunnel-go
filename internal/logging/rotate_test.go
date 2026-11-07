@@ -139,7 +139,7 @@ func TestTextHandlerFormat(t *testing.T) {
 
 	line := buf.String()
 	if !strings.Contains(line, " [socks5] INFO  org.open.scdm.common.ssh.Logf - 收到连接请求 remote=1.2.3.4:5678") {
-		t.Fatalf("文本日志格式不符合 Java 版: %q", line)
+		t.Fatalf("文本日志格式不符合预期: %q", line)
 	}
 	if len(line) < 24 || line[4] != '-' || line[10] != ' ' || line[19] != '.' {
 		t.Fatalf("时间戳格式错误: %q", line)

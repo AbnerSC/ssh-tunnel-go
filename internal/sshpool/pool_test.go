@@ -16,17 +16,16 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
+	"ssh-tunnel-go/internal/config"
 )
 
-// testSSHServer 进程内最小 sshd：支持密码认证、direct-tcpip 与 tcpip-forward。
+// testSSHServer 进程内最小 sshd：支持密码认证与 direct-tcpip。
 type testSSHServer struct {
 	ln     net.Listener
 	config *ssh.ServerConfig
 
-	mu       sync.Mutex
-	forwards map[int]net.Listener
-	conns    []*ssh.ServerConn
+	mu    sync.Mutex
+	conns []*ssh.ServerConn
 }
 
 func newTestSSHServer(t *testing.T, user, password string) *testSSHServer {
@@ -53,16 +52,13 @@ func newTestSSHServer(t *testing.T, user, password string) *testSSHServer {
 	if err != nil {
 		t.Fatalf("监听失败: %v", err)
 	}
-	s := &testSSHServer{ln: ln, config: cfg, forwards: make(map[int]net.Listener)}
+	s := &testSSHServer{ln: ln, config: cfg}
 	go s.serve()
 	t.Cleanup(func() {
 		_ = ln.Close()
 		s.mu.Lock()
 		for _, c := range s.conns {
 			_ = c.Close()
-		}
-		for _, l := range s.forwards {
-			_ = l.Close()
 		}
 		s.mu.Unlock()
 	})
@@ -104,73 +100,10 @@ func (s *testSSHServer) handle(netConn net.Conn) {
 	}
 }
 
-// handleGlobalRequests 处理 tcpip-forward（-R）与 keepalive。
-func (s *testSSHServer) handleGlobalRequests(sshConn *ssh.ServerConn, reqs <-chan *ssh.Request) {
+// handleGlobalRequests 应答 keepalive 等全局请求。
+func (s *testSSHServer) handleGlobalRequests(_ *ssh.ServerConn, reqs <-chan *ssh.Request) {
 	for req := range reqs {
-		switch req.Type {
-		case "tcpip-forward":
-			var payload struct {
-				Addr string
-				Port uint32
-			}
-			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
-				_ = req.Reply(false, nil)
-				continue
-			}
-			ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(payload.Port))))
-			if err != nil {
-				_ = req.Reply(false, nil)
-				continue
-			}
-			s.mu.Lock()
-			s.forwards[int(payload.Port)] = ln
-			s.mu.Unlock()
-			_ = req.Reply(true, nil)
-			go s.serveForward(sshConn, ln, payload.Addr, int(payload.Port))
-		case "cancel-tcpip-forward":
-			var payload struct {
-				Addr string
-				Port uint32
-			}
-			if err := ssh.Unmarshal(req.Payload, &payload); err == nil {
-				s.mu.Lock()
-				if ln, ok := s.forwards[int(payload.Port)]; ok {
-					_ = ln.Close()
-					delete(s.forwards, int(payload.Port))
-				}
-				s.mu.Unlock()
-			}
-			_ = req.Reply(true, nil)
-		default:
-			// keepalive@openssh.com 等全局请求一律应答成功
-			_ = req.Reply(true, nil)
-		}
-	}
-}
-
-// serveForward 服务器侧监听，把每个连入连接通过 forwarded-tcpip 通道转给客户端。
-func (s *testSSHServer) serveForward(sshConn *ssh.ServerConn, ln net.Listener, addr string, port int) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func() {
-			defer conn.Close()
-			payload := struct {
-				Addr       string
-				Port       uint32
-				OriginAddr string
-				OriginPort uint32
-			}{Addr: addr, Port: uint32(port), OriginAddr: "127.0.0.1", OriginPort: 12345}
-			ch, reqs, err := sshConn.OpenChannel("forwarded-tcpip", ssh.Marshal(&payload))
-			if err != nil {
-				return
-			}
-			go ssh.DiscardRequests(reqs)
-			defer ch.Close()
-			relayBoth(conn, ch)
-		}()
+		_ = req.Reply(true, nil)
 	}
 }
 
@@ -199,13 +132,6 @@ func (s *testSSHServer) handleDirectTCPIP(nc ssh.NewChannel) {
 	go ssh.DiscardRequests(reqs)
 	defer ch.Close()
 	relayBoth(target, ch)
-}
-
-func (s *testSSHServer) hasForward(port int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.forwards[port]
-	return ok
 }
 
 // relayBoth 双向转发，任一方向结束后关闭两端（测试用简易实现）。
@@ -247,17 +173,6 @@ func startEcho(t *testing.T) (string, int) {
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
 	return "127.0.0.1", port
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("获取空闲端口失败: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -336,50 +251,6 @@ func TestPoolNoSession(t *testing.T) {
 	if _, err := pool.DialContext(context.Background(), "127.0.0.1", 80); !errors.Is(err, ErrNoSession) {
 		t.Fatalf("未连接时应返回 ErrNoSession, got %v", err)
 	}
-}
-
-func TestPoolLocalForward(t *testing.T) {
-	srv := newTestSSHServer(t, "root", "secret")
-	echoHost, echoPort := startEcho(t)
-	localPort := freePort(t)
-
-	startPool(t, withTempKnownHosts(t, &config.SSHConfig{
-		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "secret", Pool: 1,
-		Locals: []config.CopyItem{{Host: echoHost, Port: echoPort, TargetPort: localPort}},
-	}))
-
-	var conn net.Conn
-	waitFor(t, "本地转发可用", func() bool {
-		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)), time.Second)
-		if err != nil {
-			return false
-		}
-		conn = c
-		return true
-	})
-	defer conn.Close()
-	echoOnce(t, conn, "local-forward-ok")
-}
-
-func TestPoolRemoteForward(t *testing.T) {
-	srv := newTestSSHServer(t, "root", "secret")
-	echoHost, echoPort := startEcho(t)
-	remotePort := freePort(t)
-
-	startPool(t, withTempKnownHosts(t, &config.SSHConfig{
-		Addr: "127.0.0.1", Port: srv.port(), User: "root", Password: "secret", Pool: 1,
-		Remotes: []config.CopyItem{{Host: echoHost, Port: echoPort, TargetPort: remotePort}},
-	}))
-
-	waitFor(t, "服务器侧远程转发监听", func() bool { return srv.hasForward(remotePort) })
-
-	conn, err := net.DialTimeout("tcp",
-		net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort)), 3*time.Second)
-	if err != nil {
-		t.Fatalf("连接远程转发端口失败: %v", err)
-	}
-	defer conn.Close()
-	echoOnce(t, conn, "remote-forward-ok")
 }
 
 func TestPoolAuthFailureKeepsRetrying(t *testing.T) {

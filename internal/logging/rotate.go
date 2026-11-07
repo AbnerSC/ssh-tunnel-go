@@ -20,7 +20,7 @@ import (
 // 缓冲里，tail -f 看不到，进程异常退出还会丢失。
 const flushInterval = time.Second
 
-// Rotator 按天滚动的文件写入器，语义与 Java 版 logback 配置一致：
+// Rotator 按天滚动的文件写入器：
 //   - 当前文件：logs/ssh-tunnel.log
 //   - 归档文件：logs/ssh-tunnel.yyyy-MM-dd.log
 //   - 保留 30 天，归档总量上限 1GB（超出时优先删除最旧的归档）

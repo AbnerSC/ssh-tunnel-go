@@ -57,7 +57,7 @@ func TestRulesDomain(t *testing.T) {
 }
 
 func TestRulesIPNotMatchedByDomain(t *testing.T) {
-	// IP 目标不参与域名规则匹配（与 Java 版一致），即使域名配置里误填了 IP 也按 IP 规则处理
+	// IP 目标不参与域名规则匹配，即使域名配置里误填了 IP 也按 IP 规则处理
 	r := New(nil, []string{"1.2.3.4"})
 	if !r.IsDirect("1.2.3.4") {
 		t.Fatal("域名配置里的 IP 应按 IP 规则处理")
@@ -105,9 +105,10 @@ func TestAddGeoSite(t *testing.T) {
 	}
 	r := New(nil, nil)
 	r.AddGeoSite(parsed["cn"])
-	// 6639 条全部生效（含 3 条 RE2 兼容正则），说明没有规则被丢弃
-	if got := r.DomainRuleCount(); got != 6639 {
-		t.Fatalf("geosite 规则应全部生效: %d", got)
+	// 解析出多少条就应该生效多少条，以此说明没有规则被丢弃。
+	// 不写死具体条数：dlc.dat 随上游 release 更新，写死后每次更新都要跟着改测试
+	if got, want := r.DomainRuleCount(), len(parsed["cn"]); got != want {
+		t.Fatalf("geosite 规则应全部生效: got=%d want=%d", got, want)
 	}
 	if !r.IsDirect("www.baidu.com") || !r.IsDirect("baidu.com") {
 		t.Fatal("baidu.com 应命中 geosite:cn")

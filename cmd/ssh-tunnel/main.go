@@ -1,6 +1,4 @@
-// Command ssh-tunnel 是 Java 版 ssh-tunnel 的 Go 重写：
-// 本地提供 SOCKS5 / HTTP 代理，按直连规则把流量分流到本机直连或 SSH 隧道，
-// 并支持 -L 本地端口转发 / -R 远程端口转发。
+// 本地提供 SOCKS5 / HTTP 代理，按直连规则把流量分流到本机直连或 SSH 隧道。
 package main
 
 import (
@@ -16,10 +14,10 @@ import (
 	"time"
 	_ "time/tzdata" // 内嵌时区数据库：精简基础镜像不带 tzdata，TZ=Asia/Shanghai 仍可生效
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/sshpool"
+	"ssh-tunnel-go/internal/config"
+	"ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/proxy"
+	"ssh-tunnel-go/internal/sshpool"
 )
 
 // 构建时通过 -ldflags "-X main.version=..." 注入
@@ -62,7 +60,9 @@ func handleOneShot(args []string) (int, bool) {
 	}
 	if params.Contains("-encode") {
 		// 明文优先从参数取；没有参数时读标准输入。
-		// 直接写在命令行上会让密码进入 shell 历史与进程列表（ps 全用户可见）
+		// 直接写在命令行上会让密码进入 shell 历史与进程列表（ps 全用户可见）。
+		// 主密钥与运行时解密共用同一套逻辑：设置了 CIPHER_MASTER_KEY 时，
+		// -encode 与服务启动必须用同一个值，否则密文无法解开
 		plain := params.ValueOr("-encode", "")
 		if plain == "" {
 			data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
@@ -89,7 +89,7 @@ func handleOneShot(args []string) (int, bool) {
 
 // health 存活探测：尝试连接本地代理端口。
 //
-// 与 Java 版 HEALTHCHECK 等价（优先 HTTP_PORT，其次 SOCKS_PORT；都未配置时恒健康），
+// 优先 HTTP_PORT，其次 SOCKS_PORT；都未配置时恒健康，
 // 但不依赖 bash 的 /dev/tcp，因此镜像无需额外安装 shell 工具。
 // 已配置但取值非法或端口不可用时判定不健康，不静默回退到另一个端口，
 // 避免掩盖配置错误。
@@ -168,7 +168,7 @@ func bindLogAddr(addr string) string {
 	return addr
 }
 
-// run 装配并运行全部代理/转发任务，返回进程退出码（0 正常，1 启动失败，2 配置错误）。
+// run 装配并运行全部代理任务，返回进程退出码（0 正常，1 启动失败，2 配置错误）。
 func run(ctx context.Context, args []string) int {
 	cfg, err := config.Load(config.NewResolver(args))
 	if err != nil {

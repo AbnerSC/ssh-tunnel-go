@@ -8,13 +8,6 @@
 #     ca-certificates；该阶段的 apt-get 以目标架构执行，跨架构构建需要 QEMU
 #     （CI 已通过 setup-qemu 提供）
 #
-# 与 Java 版镜像的兼容性：
-#   - 环境变量 SOCKS_PORT / HTTP_PORT / SOCKS_USER / SOCKS_PASSWORD /
-#     SSH_SERVER / SSH_PORT / SSH_PASSWORD / SSH_POOL / DIRECT_IP /
-#     DIRECT_DOMAIN / DIRECT_CN 语义完全一致，docker-compose 无需修改
-#   - 日志仍写入 /app/logs（按天滚动，保留 30 天 / 上限 1GB）
-#   - 健康检查改用二进制内置的 -health 子命令，不依赖 bash 的 /dev/tcp
-#
 # 安全基线（以非 root 运行）：
 #   - 运行阶段只装 ca-certificates，不装 curl/调试工具，减小攻击面
 #   - 使用 uid/gid 10001 的非特权用户，/app 与其下 known_hosts、logs 均归其所有
@@ -118,23 +111,22 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 #   DIRECT_DOMAIN  -> -direct-domain 直连域名（主域匹配）
 #   DIRECT_CN      -> -direct-cn     中国域名全量直连（geosite:cn）
 #   FORCE_DOMAIN   -> -force-domain   强制走隧道的域名，优先于直连规则
-#   LOG_FORMAT     -> json（默认）/ text（Java 版同构文本格式）
+#   LOG_FORMAT     -> json（默认）/ text
 #   LOG_LEVEL      -> debug / info（默认）/ warn / error
-#   BIND_ADDR      -> -bind          代理与 -L 端口的监听地址（默认 0.0.0.0）
+#   BIND_ADDR      -> -bind          代理端口的监听地址（默认 0.0.0.0）
 #   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
-#   ALLOW_PUBLIC_FORWARD -> -allow-public-forward 允许无认证的 -L 转发端口对外监听（默认拒绝）
 #   MAX_CONNS      -> -max-conns      代理并发连接上限（默认 256，0 表示不限制）
 #   MAX_CONNS_PER_IP -> -max-conns-per-ip 单来源 IP 并发连接上限（默认 32，0 表示不限制）
 #   SSH_KNOWN_HOSTS -> -known-hosts  服务端主机密钥记录文件（默认 /app/known_hosts）
 #   SSH_HOST_KEY    -> -host-key     固定服务端主机密钥指纹（SHA256:...，可逗号分隔多个）
-#   JAVA_OPTS      -> Java 版遗留变量，Go 版接受但忽略
+#   CIPHER_MASTER_KEY -> （无对应参数）DES3 密文主密钥，-encode 与启动解密共用；
+#                        未设置时回退内置默认密钥
 ENV SOCKS_PORT= \
     SOCKS_USER= \
     SOCKS_PASSWORD= \
     HTTP_PORT= \
     BIND_ADDR= \
     ALLOW_UNAUTH_PUBLIC= \
-    ALLOW_PUBLIC_FORWARD= \
     MAX_CONNS= \
     MAX_CONNS_PER_IP= \
     SSH_SERVER= \
@@ -143,13 +135,13 @@ ENV SOCKS_PORT= \
     SSH_POOL= \
     SSH_KNOWN_HOSTS= \
     SSH_HOST_KEY= \
+    CIPHER_MASTER_KEY= \
     DIRECT_IP= \
     DIRECT_DOMAIN= \
     DIRECT_CN= \
     FORCE_DOMAIN= \
     LOG_FORMAT= \
-    LOG_LEVEL= \
-    JAVA_OPTS=
+    LOG_LEVEL=
 
 USER app
 

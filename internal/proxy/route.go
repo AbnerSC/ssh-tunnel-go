@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/direct"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/direct"
+	"ssh-tunnel-go/internal/logging"
 )
 
 // Credentials 代理账号密码，socks5 与 http 代理共用。
@@ -19,7 +19,7 @@ type Credentials struct {
 	guard *authGuard
 }
 
-// NewCredentials 两个字段都非空时启用认证（与 Java 版一致）。
+// NewCredentials 两个字段都非空时启用认证
 // 同时创建失败限速器，挡住弱口令爆破。
 func NewCredentials(user, password string) Credentials {
 	return Credentials{
@@ -37,7 +37,7 @@ type Dialer interface {
 
 // LocalDialer 由本机直接连接目标。
 type LocalDialer struct {
-	// Timeout 建连超时，与 Java 版 NetClient 的 3s 保持一致
+	// Timeout 建连超时
 	Timeout time.Duration
 }
 

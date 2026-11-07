@@ -10,9 +10,8 @@
 #   SOCKS_USER      -> -suser  socks5/http 代理账号
 #   SOCKS_PASSWORD  -> -spwd   socks5/http 代理密码
 #   HTTP_PORT       -> -H      本地 http 代理监听端口
-#   BIND_ADDR       -> -bind          代理与 -L 端口的监听地址（默认 0.0.0.0）
+#   BIND_ADDR       -> -bind          代理端口的监听地址（默认 0.0.0.0）
 #   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
-#   ALLOW_PUBLIC_FORWARD -> -allow-public-forward 允许无认证的 -L 转发端口对外监听（默认拒绝）
 #   MAX_CONNS       -> -max-conns      代理并发连接上限（默认 256，0 不限制）
 #   MAX_CONNS_PER_IP -> -max-conns-per-ip 单 IP 并发连接上限（默认 32，0 不限制）
 #   SSH_SERVER      -> -server 隧道服务器地址与账号，如 root@1.2.3.4
@@ -26,7 +25,6 @@
 #   DIRECT_CN       -> -direct-cn     中国域名全量直连（geosite:cn）
 #   LOG_FORMAT      -> json（默认）/ text
 #   LOG_LEVEL       -> debug / info（默认）/ warn / error
-#   JAVA_OPTS       -> Java 版遗留变量，Go 版忽略
 # =====================================================================
 set -e
 

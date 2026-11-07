@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
 // defaultKnownHostsFile 未指定时的主机密钥记录文件（相对工作目录）。

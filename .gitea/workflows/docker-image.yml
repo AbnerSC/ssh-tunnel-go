@@ -20,8 +20,7 @@
 #                        nexus.example.com:8082 或 nexus.example.com/repository/docker-releases）
 #       NEXUS_USERNAME   Nexus 账号
 #       NEXUS_PASSWORD   Nexus 密码
-#   - 已注册可用的 act_runner（标签 golang，与 NexHomeGo 使用同一个 Go runner，
-#     可按实际标签修改 runs-on）
+#   - 已注册可用的 act_runner（标签 golang）
 # =====================================================================
 name: Docker 镜像构建（Nexus）
 
@@ -51,7 +50,7 @@ env:
 jobs:
   build-and-push:
     name: 构建并推送镜像到 Nexus
-    # 与 NexHomeGo 用同一个 Go runner；任务只调用 docker CLI，编译在构建容器内完成
+    # 任务只调用 docker CLI，编译在构建容器内完成
     runs-on: golang
     timeout-minutes: 60
     steps:

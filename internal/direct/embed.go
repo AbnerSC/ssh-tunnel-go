@@ -2,7 +2,7 @@ package direct
 
 import _ "embed"
 
-// dlc.dat 来自 v2fly domain-list-community 发布件，与 Java 版内置数据同版本。
+// dlc.dat 来自 v2fly domain-list-community 发布件。
 //
 //go:embed dlc.dat
 var dlcData []byte

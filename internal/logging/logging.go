@@ -1,8 +1,8 @@
-// Package logging 提供与 Java 版对齐的日志能力：
+// Package logging 提供日志能力：
 // 控制台 + 文件双输出、按天滚动归档、30 天/1GB 保留策略。
 //
 // 默认输出 JSON 结构化日志（每行一条），设置 LOG_FORMAT=text 可切换为
-// Java 版同构的文本格式，便于沿用既有日志解析规则。
+// 传统文本格式，便于沿用既有日志解析规则。
 package logging
 
 import (
@@ -15,10 +15,10 @@ import (
 	"sync"
 )
 
-// loggerName 与 Java 版一致，保证文本模式下日志行可直接被既有规则解析。
+// loggerName 保证文本模式下日志行可直接被既有规则解析。
 const loggerName = "org.open.scdm.common.ssh.Logf"
 
-// 文件日志参数与 Java 版 logback.xml 保持一致。
+// 文件日志参数配置。
 const (
 	logDirName  = "logs"
 	logFileName = "ssh-tunnel.log"
@@ -170,7 +170,7 @@ func sanitizeValue(s string) string {
 	return b.String()
 }
 
-// textHandler 复刻 Java 版 logback 的行格式：
+// textHandler 输出传统文本行格式：
 //
 //	2026-10-23 12:00:00.123 [组件] INFO  org.open.scdm.common.ssh.Logf - 消息
 //

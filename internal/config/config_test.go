@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
+	"ssh-tunnel-go/internal/proxy"
 )
 
 // clearEnv 把所有支持的环境变量置空，避免宿主环境干扰测试。
@@ -12,11 +12,13 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
-		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC", "ALLOW_PUBLIC_FORWARD",
+		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC",
 		"MAX_CONNS", "MAX_CONNS_PER_IP",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
+		// 主密钥同样置空，避免宿主环境注入后影响黄金向量类用例
+		"CIPHER_MASTER_KEY",
 	} {
 		t.Setenv(key, "")
 	}
@@ -26,16 +28,16 @@ func clearEnv(t *testing.T) {
 func TestLoadProductionCompose(t *testing.T) {
 	clearEnv(t)
 	env := map[string]string{
-		"SOCKS_PORT":     "11823",
-		"HTTP_PORT":      "11825",
+		"SOCKS_PORT":     "6666",
+		"HTTP_PORT":      "6667",
 		"SOCKS_USER":     "user",
 		"SOCKS_PASSWORD": "pwd123",
-		"SSH_SERVER":     "root@172.81.101.123",
+		"SSH_SERVER":     "root@172.1.2.3",
 		"SSH_PORT":       "22",
 		"SSH_PASSWORD":   "croot!123",
 		"SSH_POOL":       "6",
-		"DIRECT_IP":      "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1,119.112.123.222",
-		"DIRECT_DOMAIN":  "localhost,1997.fun,05200809.xyz,openeuler.org",
+		"DIRECT_IP":      "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1,119.1.2.3",
+		"DIRECT_DOMAIN":  "localhost,1997.fun,openeuler.org",
 		"DIRECT_CN":      "true",
 	}
 	for k, v := range env {
@@ -49,7 +51,7 @@ func TestLoadProductionCompose(t *testing.T) {
 	if !cfg.CheckWork() {
 		t.Fatal("应存在可执行任务")
 	}
-	if cfg.SocksPort != 11823 || cfg.HTTPPort != 11825 {
+	if cfg.SocksPort != 6666 || cfg.HTTPPort != 6667 {
 		t.Fatalf("端口解析错误: socks=%d http=%d", cfg.SocksPort, cfg.HTTPPort)
 	}
 	if cfg.SocksUser != "user" || cfg.SocksPassword != "pwd123" {
@@ -58,14 +60,14 @@ func TestLoadProductionCompose(t *testing.T) {
 	if cfg.SSH == nil {
 		t.Fatal("SSH 配置不应为空")
 	}
-	if cfg.SSH.Addr != "172.81.101.123" || cfg.SSH.User != "root" {
+	if cfg.SSH.Addr != "172.1.2.3" || cfg.SSH.User != "root" {
 		t.Fatalf("-server 解析错误: %+v", cfg.SSH)
 	}
 	if cfg.SSH.Port != 22 || cfg.SSH.Pool != 6 || cfg.SSH.Password != "croot!123" {
 		t.Fatalf("SSH 参数解析错误: %+v", cfg.SSH)
 	}
 
-	directIPs := []string{"192.168.1.1", "10.1.2.3", "172.16.5.5", "127.0.0.1", "119.112.123.222"}
+	directIPs := []string{"192.168.1.1", "10.1.2.3", "172.16.5.5", "127.0.0.1", "119.1.2.3"}
 	for _, ip := range directIPs {
 		if !cfg.Direct.IsDirect(ip) {
 			t.Fatalf("%s 应命中直连", ip)
@@ -110,10 +112,10 @@ func TestLoadServerWithoutUser(t *testing.T) {
 func TestLoadEncryptedPassword(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SSH_SERVER", "root@1.2.3.4")
-	t.Setenv("SSH_PASSWORD", javaGoldenLayers[3])
+	t.Setenv("SSH_PASSWORD", goldenLayers[3])
 	t.Setenv("SOCKS_PORT", "6666")
 	t.Setenv("SOCKS_USER", "u")
-	t.Setenv("SOCKS_PASSWORD", javaGoldenLayers[3])
+	t.Setenv("SOCKS_PASSWORD", goldenLayers[3])
 
 	cfg, err := Load(NewResolver(nil))
 	if err != nil {
@@ -141,51 +143,55 @@ func TestLoadNoWork(t *testing.T) {
 	}
 }
 
-func TestLoadForwardRules(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("SSH_SERVER", "root@1.2.3.4")
-	// 本地转发端口无认证，默认禁止非回环监听；这里验证规则解析，显式放行
-	t.Setenv("ALLOW_PUBLIC_FORWARD", "true")
-	cfg, err := Load(NewResolver([]string{
-		"-L", "127.0.0.1:80-8080",
-		"-s", "127.0.0.1:81-8081",
-		"-R", "127.0.0.1:90-9090",
-		"-R", "127.0.0.1:90-9090", // 重复项应去重
-	}))
-	if err != nil {
-		t.Fatalf("Load 失败: %v", err)
+// TestLoadRejectsForwardFlags 端口转发参数必须报错而不是静默忽略。
+//
+// 本版本已删除 -L/-s/-R 实现，而 ParamFormat 对未识别参数不报错；
+// 若不做拦截，历史部署带着这些参数仍会正常启动，运维却看不到转发已不生效。
+func TestLoadRejectsForwardFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"-L", []string{"-L", "127.0.0.1:3306-13306"}, "-L"},
+		{"-s 旧别名", []string{"-s", "127.0.0.1:3306-13306"}, "-s"},
+		{"-R", []string{"-R", "127.0.0.1:80-8080"}, "-R"},
+		{"多个同时", []string{"-L", "127.0.0.1:3306-13306", "-R", "127.0.0.1:80-8080"}, "-L、-R"},
 	}
-	if len(cfg.SSH.Locals) != 2 {
-		t.Fatalf("-L/-s 应合并为 2 条: %+v", cfg.SSH.Locals)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SSH_SERVER", "root@1.2.3.4")
+			_, err := Load(NewResolver(c.args))
+			if err == nil {
+				t.Fatalf("%s 应被拒绝", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "端口转发") {
+				t.Fatalf("报错信息应说明转发已移除并列出 %q，实际: %v", c.want, err)
+			}
+		})
 	}
-	// 解析顺序与 Java 版一致：-s 在 -L 之前
-	want := map[int]CopyItem{
-		8080: {Host: "127.0.0.1", Port: 80, TargetPort: 8080},
-		8081: {Host: "127.0.0.1", Port: 81, TargetPort: 8081},
-	}
-	for _, item := range cfg.SSH.Locals {
-		if item != want[item.TargetPort] {
-			t.Fatalf("本地转发解析错误: %+v", item)
+
+	// 对照组：不转发时同样含 -s 前缀的认证参数不能被误杀
+	t.Run("认证参数不受影响", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("SOCKS_PORT", "1080")
+		if _, err := Load(NewResolver([]string{"-suser", "u", "-spwd", "p"})); err != nil {
+			t.Fatalf("-suser/-spwd 不应被当成转发参数: %v", err)
 		}
-	}
-	if len(cfg.SSH.Remotes) != 1 {
-		t.Fatalf("-R 去重后应为 1 条: %+v", cfg.SSH.Remotes)
-	}
-	if !cfg.CheckWork() {
-		t.Fatal("仅端口转发也应视为有任务")
-	}
+	})
 }
 
 func TestLoadEnvPriorityOverArgs(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SOCKS_PORT", "11823")
+	t.Setenv("SOCKS_PORT", "6666")
 	// 无认证代理默认只能在回环上开，这里显式放行以验证参数优先级
 	t.Setenv("ALLOW_UNAUTH_PUBLIC", "true")
 	cfg, err := Load(NewResolver([]string{"-D", "6666"}))
 	if err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}
-	if cfg.SocksPort != 11823 {
+	if cfg.SocksPort != 6666 {
 		t.Fatalf("环境变量应优先: %d", cfg.SocksPort)
 	}
 }
@@ -291,9 +297,6 @@ func TestLoadAllowsUnauthOnLoopback(t *testing.T) {
 		if cfg.BindAddr != bind {
 			t.Fatalf("BIND_ADDR 解析错误: %q", cfg.BindAddr)
 		}
-		if cfg.SSH != nil && cfg.SSH.BindAddr != bind {
-			t.Fatalf("本地转发应继承 BIND_ADDR: %q", cfg.SSH.BindAddr)
-		}
 	}
 }
 
@@ -309,109 +312,6 @@ func TestLoadAllowsUnauthWithExplicitOptIn(t *testing.T) {
 	if !cfg.AllowUnauthPublic {
 		t.Fatal("ALLOW_UNAUTH_PUBLIC 未解析")
 	}
-}
-
-// TestLoadRejectsPublicLocalForwardByDefault 无认证的 -L 端口默认不得对非回环地址监听。
-//
-// 转发端口不经过任何认证，默认 0.0.0.0 监听等于把内网目标（数据库、SSH 等）
-// 直接开放给整个网段，因此与无认证代理采用同一策略：必须显式放行。
-func TestLoadRejectsPublicLocalForwardByDefault(t *testing.T) {
-	for _, bind := range []string{"", "0.0.0.0", "::"} {
-		t.Run("bind="+bind, func(t *testing.T) {
-			clearEnv(t)
-			t.Setenv("SSH_SERVER", "root@1.2.3.4")
-			if bind != "" {
-				t.Setenv("BIND_ADDR", bind)
-			}
-			if _, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"})); err == nil {
-				t.Fatalf("bind=%q 时无认证本地转发对外监听应被拒绝", bind)
-			}
-		})
-	}
-}
-
-// TestLoadAllowsLocalForwardOnLoopback 仅监听回环时允许无认证转发（本机自用）。
-func TestLoadAllowsLocalForwardOnLoopback(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("SSH_SERVER", "root@1.2.3.4")
-	t.Setenv("BIND_ADDR", "127.0.0.1")
-	cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"}))
-	if err != nil {
-		t.Fatalf("回环监听应允许: %v", err)
-	}
-	if cfg.AllowPublicForward {
-		t.Fatal("未显式配置时 AllowPublicForward 应为 false")
-	}
-	if cfg.SSH == nil || len(cfg.SSH.Locals) != 1 {
-		t.Fatalf("-L 规则未生效: %+v", cfg.SSH)
-	}
-}
-
-// TestLoadAllowsPublicLocalForwardWithOptIn 显式放行后才允许转发端口对外监听。
-func TestLoadAllowsPublicLocalForwardWithOptIn(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("SSH_SERVER", "root@1.2.3.4")
-	t.Setenv("ALLOW_PUBLIC_FORWARD", "true")
-	cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"}))
-	if err != nil {
-		t.Fatalf("显式放行后应允许: %v", err)
-	}
-	if !cfg.AllowPublicForward {
-		t.Fatal("ALLOW_PUBLIC_FORWARD 未解析")
-	}
-}
-
-// TestLoadRejectsInvalidPublicForwardValue 开关写错时不得静默当成 false/true。
-func TestLoadRejectsInvalidPublicForwardValue(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("SSH_SERVER", "root@1.2.3.4")
-	t.Setenv("ALLOW_PUBLIC_FORWARD", "yes-please")
-	if _, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306"})); err == nil {
-		t.Fatal("非法布尔值应报错")
-	}
-}
-
-// TestLoadRejectsForwardWithoutServer -L/-R 只能经 SSH 会话转发：
-// 没配服务器时规则无处安放，必须启动即报错（否则进程会以 0 退出，看起来像部署成功）。
-func TestLoadRejectsForwardWithoutServer(t *testing.T) {
-	cases := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"仅 -L", []string{"-L", "127.0.0.1:3306-13306"}, "-L 1 条"},
-		{"-s 别名", []string{"-s", "127.0.0.1:3306-13306"}, "-L 1 条"},
-		{"仅 -R", []string{"-R", "127.0.0.1:80-8080"}, "-R 1 条"},
-		{"-L 与 -R", []string{"-L", "127.0.0.1:3306-13306", "-L", "127.0.0.1:3307-13307", "-R", "127.0.0.1:80-8080"}, "-L 2 条、-R 1 条"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			clearEnv(t)
-			_, err := Load(NewResolver(c.args))
-			if err == nil {
-				t.Fatalf("%s 缺少 SSH 服务器时应报错", c.name)
-			}
-			if !strings.Contains(err.Error(), "SSH_SERVER") || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("报错信息应包含 %q 并提示 SSH_SERVER，实际: %v", c.want, err)
-			}
-		})
-	}
-
-	// 对照组：配好服务器后同样的规则应能通过，避免上面的校验错杀正常配置
-	t.Run("有服务器则通过", func(t *testing.T) {
-		clearEnv(t)
-		t.Setenv("SSH_SERVER", "root@1.2.3.4")
-		t.Setenv("SSH_PASSWORD", "x")
-		// -L 监听无认证，非回环地址默认被拒；这里只验证「有服务器则不报缺服务器」
-		t.Setenv("BIND_ADDR", "127.0.0.1")
-		cfg, err := Load(NewResolver([]string{"-L", "127.0.0.1:3306-13306", "-R", "127.0.0.1:80-8080"}))
-		if err != nil {
-			t.Fatalf("配了服务器时不应报错: %v", err)
-		}
-		if cfg.SSH == nil || len(cfg.SSH.Locals) != 1 || len(cfg.SSH.Remotes) != 1 {
-			t.Fatalf("转发规则未落到配置上: %+v", cfg.SSH)
-		}
-	})
 }
 
 // TestLoadParsesHostKeyOptions 主机密钥校验相关配置应能通过参数与环境变量传入。

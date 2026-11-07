@@ -11,13 +11,13 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/config"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/proxy"
+	"ssh-tunnel-go/internal/config"
+	"ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/proxy"
 )
 
 const (
-	// connectTimeout 建连 + 密钥交换 + 认证的总超时（与 Java 版 CONNECT_TIMEOUT 一致）
+	// connectTimeout 建连 + 密钥交换 + 认证的总超时
 	connectTimeout = 10 * time.Second
 	// channelConnectTimeout direct-tcpip 通道建立超时，需等对端完成到目标的 TCP 连接
 	channelConnectTimeout = 10 * time.Second
@@ -27,7 +27,7 @@ const (
 	keepAliveTimeout = 15 * time.Second
 	// keepAliveMaxFails 连续多少次心跳无响应判定会话失效
 	keepAliveMaxFails = 3
-	// reconnectWait 连接失败/断开后的重试间隔（与 Java 版 ERROR_WAIT_TIME 一致）
+	// reconnectWait 连接失败/断开后的重试间隔
 	reconnectWait = 5 * time.Second
 	// maxReconnectWait 连续失败时的退避上限。
 	// 服务器宕机/密码错误时若无上限，每个槽位每 5s 重试一次，
@@ -42,13 +42,34 @@ const (
 // ErrNoSession 当前没有可用的 SSH 会话。
 var ErrNoSession = errors.New("没有可用的SSH会话")
 
-// cipherList 与 Java 版一致：AEAD 优先，保留 CTR/ChaCha20/CBC 兼容回退。
+// cipherList：AEAD 优先，保留 CTR/ChaCha20/CBC 兼容回退。
 // 注意 sshd 必须与服务端至少有一个共同算法，否则握手失败。
 var cipherList = []string{
 	"aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
 	"aes128-ctr", "aes192-ctr", "aes256-ctr",
 	"chacha20-poly1305@openssh.com",
 	"aes128-cbc", "aes192-cbc", "aes256-cbc",
+}
+
+// conn 一条已认证的 SSH 会话。
+type conn struct {
+	client *ssh.Client
+	index  int
+
+	closed    atomic.Bool
+	closeOnce sync.Once
+}
+
+func (c *conn) alive() bool {
+	return c != nil && !c.closed.Load()
+}
+
+// close 幂等关闭会话。
+func (c *conn) close() {
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		_ = c.client.Close()
+	})
 }
 
 // Pool SSH 连接池：维持 N 条会话，按轮询分发 direct-tcpip 通道。
@@ -58,20 +79,14 @@ type Pool struct {
 	hostKeys *hostKeyStore
 
 	slots []atomic.Pointer[conn]
-	main  atomic.Pointer[conn]
 	index atomic.Uint64
-
-	electMu sync.Mutex
-
-	localMu sync.Mutex
-	locals  []net.Listener
 
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 }
 
-// New 创建连接池；-L 监听在 Start 时建立。
+// New 创建连接池。
 func New(cfg *config.SSHConfig) *Pool {
 	size := cfg.Pool
 	if size < 1 {
@@ -85,11 +100,10 @@ func New(cfg *config.SSHConfig) *Pool {
 	}
 }
 
-// Start 启动本地转发监听与 N 个会话维持协程。
+// Start 启动 N 个会话维持协程。
 func (p *Pool) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
-	p.startLocals()
 	for i := range p.slots {
 		idx := i
 		p.wg.Add(1)
@@ -100,18 +114,11 @@ func (p *Pool) Start(ctx context.Context) {
 	}
 }
 
-// Close 停止全部会话与监听。
+// Close 停止全部会话。
 func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
 		if p.cancel != nil {
 			p.cancel()
-		}
-		p.localMu.Lock()
-		listeners := p.locals
-		p.locals = nil
-		p.localMu.Unlock()
-		for _, ln := range listeners {
-			_ = ln.Close()
 		}
 		for i := range p.slots {
 			if c := p.slots[i].Load(); c != nil {
@@ -211,17 +218,12 @@ func (p *Pool) runSlot(ctx context.Context, idx int) {
 		fails = 0
 		logging.Info("ssh", "创建连接成功", "server", server, "slot", idx)
 		p.slots[idx].Store(c)
-		p.electMain()
 
 		p.serve(ctx, c)
 
-		// 先把会话标记为已关闭再清空槽位：若顺序反过来，并发的 electMain
-		// 可能看到「仍在槽位且 alive」的旧主会话而跳过选举，
-		// 导致 -R 转发在旧主会话真正关闭后无人承担。
 		c.close()
 		p.slots[idx].CompareAndSwap(c, nil)
-		p.electMain()
-		// 断线后的首次重连沿用 5s 固定等待（与 Java 版一致），
+		// 断线后的首次重连沿用 5s 固定等待，
 		// 若重连继续失败则转为指数退避
 		fails = 1
 		logging.Warn("ssh", "发生异常，断开连接", "server", server, "slot", idx)
@@ -313,30 +315,6 @@ func (p *Pool) serve(ctx context.Context, c *conn) {
 			fails = 0
 		}
 	}
-}
-
-// electMain 选举主会话，由其承担 -R 远程端口转发。
-func (p *Pool) electMain() {
-	p.electMu.Lock()
-	defer p.electMu.Unlock()
-	if cur := p.main.Load(); cur != nil && cur.alive() {
-		return
-	}
-	var chosen *conn
-	for i := range p.slots {
-		if c := p.slots[i].Load(); c != nil && c.alive() {
-			chosen = c
-			break
-		}
-	}
-	p.main.Store(chosen)
-	if chosen == nil {
-		return
-	}
-	logging.Info("ssh", "选举主会话", "slot", chosen.index)
-	// 不持锁做网络请求：tcpip-forward 要等服务端应答（失败还会重试），
-	// 同步执行会把其它槽位的选举一起阻塞。
-	go chosen.startRemotes(p.cfg.Remotes)
 }
 
 func (p *Pool) serverAddr() string {

@@ -17,27 +17,21 @@ services:
   ssh-tunnel:
     image: babyfly/ssh-tunnel:latest
     container_name: ssh-tunnel
-    hostname: linux
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
-      - BIND_ADDR=0.0.0.0
       - SOCKS_PORT=6666
       - HTTP_PORT=6667
-      - SOCKS_USER=socks_user
-      - SOCKS_PASSWORD=socks_pwd
-      - SSH_SERVER=root@1.2.3.4
-      - SSH_PORT=2
-      - SSH_PASSWORD=server_pwd
-      - SSH_POOL=6
-      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8
-      - DIRECT_DOMAIN=localhost,xxxx.fun,xxxx.xyz
-      - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn
+      - SOCKS_USER=socks_user     # 代理账号
+      - SOCKS_PASSWORD=socks_pwd  # 代理密码
+      - SSH_SERVER=root@1.2.3.4   # 服务器地址与账号
+      - SSH_PORT=22               # 服务器SSH端口
+      - SSH_PASSWORD=server_pwd   # 服务器SSH密码
+      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+      - DIRECT_DOMAIN=localhost,xxxx.fun # 直连域名
       - DIRECT_CN=true
-      - ALLOW_UNAUTH_PUBLIC=false
-      - ALLOW_PUBLIC_FORWARD=false
-      - MAX_CONNS=256
-      - MAX_CONNS_PER_IP=32
+      - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn # 强制代理域名
+      - SSH_KNOWN_HOSTS=/app/logs/known_hosts
     ports:
       - 16666:6666
       - 16667:6667
@@ -48,101 +42,47 @@ services:
 
 - 环境变量说明：
 
-| 环境变量         | 对应参数         | 说明                                                                                           |
-|------------------|------------------|------------------------------------------------------------------------------------------------|
-| `SOCKS_PORT`     | `-D`             | 本地socks5监听端口                                                                             |
-| `HTTP_PORT`      | `-H`             | 本地http代理监听端口                                                                           |
-| `SOCKS_USER`     | `-suser`         | 代理账号，socks5 与 http 代理共用（可选）                                                      |
-| `SOCKS_PASSWORD` | `-spwd`          | 代理密码，socks5 与 http 代理共用（可选）                                                      |
-| `SSH_SERVER`     | `-server`        | 隧道服务器地址与账号，如 `root@1.2.3.4`（可选）当为空时，默认本机直接提供代理                  |
-| `SSH_PORT`       | `-p`             | 服务器SSH端口（可选）,跟随`SSH_SERVER`一起配置                                                 |
-| `SSH_PASSWORD`   | `-P`             | 服务器SSH密码（可选）,跟随`SSH_SERVER`一起配置                                                 |
-| `SSH_POOL`       | `-pool`          | SSH 连接池大小（可选），建议不配置，默认配置已最优                                             |
-| `DIRECT_IP`      | `-direct-ip`     | 直连IP/网段（逗号或空格分隔多个值，可选）                                                      |
-| `DIRECT_DOMAIN`  | `-direct-domain` | 直连域名，匹配主域名（逗号或空格分隔，可选）                                                   |
-| `DIRECT_CN`      | `-direct-cn`     | 中国域名全量直连，取值 `true` 启用默认 `cn` 列表，也可直接写 geosite 名(如 `cn,private`，可选) |
-| `FORCE_DOMAIN`   | `-force-domain`  | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                             |
-| `BIND_ADDR`      | `-bind`          | 代理与 `-L` 转发端口的监听地址，默认 `0.0.0.0`；设 `127.0.0.1` 则仅本机可用（可选）            |
-| `ALLOW_UNAUTH_PUBLIC` | `-allow-unauth-public` | 允许在非回环地址上提供**无认证**代理，默认 `false`（启动时报错）                        |
-| `ALLOW_PUBLIC_FORWARD` | `-allow-public-forward` | 允许无认证的 `-L` 本地转发端口在非回环地址上监听，默认 `false`（启动时报错）           |
-| `MAX_CONNS`      | `-max-conns`     | 代理并发连接上限（全局，SOCKS5 与 HTTP 共享配额），默认 `256`，`0` 表示不限制（可选）          |
-| `MAX_CONNS_PER_IP` | `-max-conns-per-ip` | 单来源 IP 的并发连接上限，默认 `32`，`0` 表示不限制；不得大于 `MAX_CONNS`（可选）          |
-| `SSH_KNOWN_HOSTS` | `-known-hosts`  | 服务端主机密钥记录文件，默认工作目录下的 `known_hosts`（容器内为 `/app/known_hosts`）         |
-| `SSH_HOST_KEY`   | `-host-key`      | 固定服务端主机密钥指纹（`SHA256:...`），可重复传参或逗号分隔多个；设置后只接受匹配的指纹         |
+| 环境变量               | 说明                                                                                                                                                                                       |
+|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `SOCKS_PORT`           | 本地socks5监听端口                                                                                                                                                                         |
+| `HTTP_PORT`            | 本地http代理监听端口                                                                                                                                                                       |
+| `SOCKS_USER`           | 代理账号，socks5 与 http 代理共用（可选）                                                                                                                                                  |
+| `SOCKS_PASSWORD`       | 代理密码，socks5 与 http 代理共用（可选）                                                                                                                                                  |
+| `SSH_SERVER`           | 隧道服务器地址与账号，如 `root@1.2.3.4`（可选）当为空时，默认本机直接提供代理                                                                                                              |
+| `SSH_PORT`             | 服务器SSH端口（可选）,跟随`SSH_SERVER`一起配置                                                                                                                                             |
+| `SSH_PASSWORD`         | 服务器SSH密码（可选）,跟随`SSH_SERVER`一起配置                                                                                                                                             |
+| `SSH_POOL`             | SSH 连接池大小（可选），建议不配置，默认配置已最优                                                                                                                                         |
+| `DIRECT_IP`            | 直连IP/网段（逗号或空格分隔多个值，可选）                                                                                                                                                  |
+| `DIRECT_DOMAIN`        | 直连域名，匹配主域名（逗号或空格分隔，可选）                                                                                                                                               |
+| `DIRECT_CN`            | 中国域名全量直连，取值 `true` 启用默认 `cn` 列表，也可直接写 geosite 名(如 `cn,private`，可选)                                                                                             |
+| `FORCE_DOMAIN`         | 强制走 SSH 隧道的域名（主域匹配），优先级高于全部直连规则（可选）                                                                                                                          |
+| `BIND_ADDR`            | 代理端口的监听地址，默认 `0.0.0.0`；设 `127.0.0.1` 则仅本机可用（可选）                                                                                                        |
+| `ALLOW_UNAUTH_PUBLIC`  | 允许在非回环地址上提供**无认证**代理，默认 `false`                                                                                                                       |
+| `MAX_CONNS`            | 代理并发连接上限（全局，SOCKS5 与 HTTP 共享配额），默认 `256`，`0` 表示不限制（可选）                                                                                                      |
+| `MAX_CONNS_PER_IP`     | 单来源 IP 的并发连接上限，默认 `32`，`0` 表示不限制；不得大于 `MAX_CONNS`（可选）                                                                                                          |
+| `SSH_KNOWN_HOSTS`      | 服务端主机密钥记录文件，默认工作目录下的 `known_hosts`（容器内为 `/app/logs/known_hosts`）（可选）                                                                                                      |
+| `SSH_HOST_KEY`         | 固定服务端主机密钥指纹（`SHA256:...`），可重复传参或逗号分隔多个；设置后只接受匹配的指纹 （可选）                                                                                                  |
+| `CIPHER_MASTER_KEY`    | DES3 密文主密钥，`-encode` 加密与启动解密共用；未设置时回退内置默认密钥。高安全部署建议通过 docker secrets / K8s Secret 注入自定义值，让源码里的默认密钥不参与加解密 |
 
-### 端口转发（-L / -R）
+### 部署须知（安全）
 
-与代理端口并列的裸 TCP 端口转发，**只能经 SSH 会话完成**，因此必须先配置 `SSH_SERVER`；只给 `-L`/`-R` 而不给服务器时进程会直接启动失败（退出码 2），不会静默丢弃规则。两者都不做认证，也不受 `DIRECT_IP` / `DIRECT_DOMAIN` 直连规则影响。
-
-- 格式：`host:port-目标端口`（如 `127.0.0.1:3306-13306`）或 `目标端口:host:port`（如 `13306:127.0.0.1:3306`）。`目标端口` 是**监听端口**，`host:port` 是**通道对端地址**；可重复传参，`-s` 是 `-L` 的历史别名。
-- `-L`（本地转发）：在本机 `BIND_ADDR:目标端口` 监听，连接经隧道由 **SSH 服务器** 去连 `host:port`，因此可以访问服务器侧的回环与内网服务。监听地址跟随 `BIND_ADDR`，非回环地址需 `ALLOW_PUBLIC_FORWARD=true` 显式放行。
-- `-R`（远程转发）：在 **SSH 服务器** 的 `127.0.0.1:目标端口` 监听——绑定地址固定为服务器回环，**服务器之外的机器访问不到**；连接经隧道回传到本机，由本机直连 `host:port`。
-
-这两个参数没有对应的环境变量，容器里请用命令行传入：
-
-```bash
-docker run -d --name ssh-tunnel \
-  -e SSH_SERVER=root@1.2.3.4 -e SSH_PASSWORD=pwd \
-  ssh-tunnel:latest -L 127.0.0.1:3306-13306 -R 127.0.0.1:8080-8080
-```
-
-### 安全基线（重要）
-
-代理端口一旦暴露在网络上，就是一个能访问服务器侧内网的入口，部署前请确认以下几项：
-
-1. **必须配置代理认证**。`SOCKS_USER` 与 `SOCKS_PASSWORD` 需要**同时**配置；只配其中一个会直接启动失败。
-2. **无认证代理默认不允许对外监听**。未配认证且 `BIND_ADDR` 不是回环地址时进程会拒绝启动，并提示三种处理方式：
-   - 配置 `SOCKS_USER` + `SOCKS_PASSWORD`；
-   - 设 `BIND_ADDR=127.0.0.1`（仅本机/同机容器使用）；
-   - 确认有网络隔离后显式设 `ALLOW_UNAUTH_PUBLIC=true`。
-3. **无认证的 `-L` 转发端口默认不允许对外监听**。转发端口本身不做任何认证，`BIND_ADDR` 不是回环地址（含默认的 `0.0.0.0`）时进程会拒绝启动；确需对外暴露时设 `ALLOW_PUBLIC_FORWARD=true` 显式放行，并自行确保网络隔离。
-4. **并发连接有双维度上限**。默认全局 `256`、单来源 IP `32`（SOCKS5 与 HTTP 共用同一份配额），超额连接直接关闭，拒绝日志每秒最多一条；按每连接约 256KB 缓冲估算，默认值约需 64MB 内存。内存更紧张时调低 `MAX_CONNS`，`0` 表示不限制（不建议）。
-5. **认证失败会限速封禁**。同一来源 IP 1 分钟内失败 10 次即封禁 5 分钟，并把连接压到不可爆破的速率；成功认证会清零计数。
-6. **SSH 主机密钥默认首次信任（TOFU）**。首次连接会把服务端指纹写入 `SSH_KNOWN_HOSTS`，之后指纹变化会拒绝连接并报“主机密钥已变更”；生产环境建议直接用 `SSH_HOST_KEY` 固定指纹，避免首次连接被中间人冒领：
-   ```bash
-   ssh-keyscan -p 22 1.2.3.4 | ssh-keygen -lf -   # 取 SHA256 指纹
-   ```
-7. **HTTPS 请用 CONNECT 隧道**。普通 HTTP 转发会改写 `Host`、剔除逐跳头与 `X-Forwarded-For`/`X-Real-IP` 等可伪造来源的头，并拒绝 `Transfer-Encoding` 与 `Content-Length` 共存的请求；HTTPS 走 `CONNECT` 全程加密透传。
-8. **日志已清洗**。文本模式下字段值中的换行/控制字符会被转义，无法通过用户名等输入伪造整行日志；日志文件权限为 `0640`。
-9. **容器以非 root 运行**（uid 10001），只装 `ca-certificates`；如需监听 1024 以下端口请用 `--cap-add=NET_BIND_SERVICE` 或改用高位端口。
-10. **建议再叠一层运行时约束**。镜像本身已用非 root，但 Docker 默认仍允许提权到 setuid 程序，建议启动时补上下面三个参数（实测镜像在非 root 下 `CapEff` 已为 0，再加这些参数可进一步封死提权与落盘）：
-   ```bash
-   docker run -d --name ssh-tunnel \
-     --security-opt no-new-privileges \
-     --cap-drop ALL \
-     --read-only --tmpfs /tmp \
-     -v ssh-tunnel-logs:/app/logs \
-     -p 127.0.0.1:6666:6666 -p 127.0.0.1:6667:6667 \
-     -e SOCKS_PORT=6666 -e HTTP_PORT=6667 \
-     -e SOCKS_USER=user -e SOCKS_PASSWORD=pwd \
-     -e SSH_SERVER=root@1.2.3.4 -e SSH_PASSWORD=pwd \
-     ssh-tunnel:latest
-   ```
-   注意 `--read-only` 时 `/app/known_hosts` 需改为挂载到可写卷（或改用 `SSH_HOST_KEY` 固定指纹，不再落盘），端口发布也请绑定回环地址。
+1. **代理认证必须成对配置**。`SOCKS_USER` 与 `SOCKS_PASSWORD` 需要**同时**配置，只配其中一个会直接启动失败。
+2. **无认证不允许对外监听**。未配认证且 `BIND_ADDR` 不是回环地址时进程拒绝启动，三选一：配齐认证；设 `BIND_ADDR=127.0.0.1`（仅本机/同机容器）；确认网络隔离后显式设 `ALLOW_UNAUTH_PUBLIC=true`。
+3. **SSH 主机密钥默认首次信任（TOFU）**。首次连接会把服务端指纹写入 `SSH_KNOWN_HOSTS`（容器内默认为 `/app/logs/known_hosts`，建议改到已挂载的可写目录里持久化，否则每次重建都要重新信任），之后指纹变化会拒绝连接并报“主机密钥已变更”；生产环境建议用 `SSH_HOST_KEY` 固定指纹：
+4. **认证失败会限速封禁**。同一来源 IP 1 分钟内失败 10 次即封禁 5 分钟。
+5. **并发上限决定内存占用**。默认全局 `256`、单来源 IP `32`（SOCKS5 与 HTTP 共享配额），约需 64MB；内存紧张时调低 `MAX_CONNS`，`0` 表示不限制（不建议）。
+6. **容器以非 root 运行**（uid 10001，只装 `ca-certificates`）；监听 1024 以下端口需 `--cap-add=NET_BIND_SERVICE` 或改用高位端口。
 
 ### 使用测试
 
-1. 测试HTTP代理
 ```bash
-# 未配置账号密码（仅限 BIND_ADDR=127.0.0.1 或 ALLOW_UNAUTH_PUBLIC=true）
-curl -x http://127.0.0.1:6667 https://www.google.com
-
 # 已配置账号密码
 curl -x http://socks_user:socks_pwd@127.0.0.1:6667 https://www.google.com
+curl -x socks5h://socks_user:socks_pwd@127.0.0.1:6666 https://www.google.com
+
+# 未配置账号密码（仅限 BIND_ADDR=127.0.0.1 或 ALLOW_UNAUTH_PUBLIC=true）
+curl -x http://127.0.0.1:6667 https://www.google.com
 ```
-
-### Java 生态客户端兼容（Nexus 3 / Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
-
-Java 侧主流 HttpClient 默认走 RFC 7235 的质询–重试流，与 curl/libcurl 的“预先带凭据”不同，本代理已针对该差异做专门处理：
-
-- **首请求不带 `Proxy-Authorization` 不计入爆破失败**。Nexus 3 使用 `PoolingHttpClientConnectionManager` 并发抓 Maven Central / Docker Hub，一分钟同一来源很容易累积 10+ 条质询探测，旧实现会把它当爆破直接封禁 5 分钟，日志持续刷「`http代理认证不通过`」。
-- **带正文的 407 强制 `Connection: close`**。Apache HttpClient / Jetty client 在 POST/PUT 下默认不启用 `Expect: 100-continue`，正文会跟请求头一起先到达代理；此时若在同一连接上回 407，客户端重试的新请求与代理未消费的旧正文会串包，表现为目标侧 `400 Bad Request` 或参数错位。无正文的 CONNECT / GET / HEAD 仍在同连接上重试，不额外开 TCP。
-- **`Proxy-Authenticate` 声明 `charset="UTF-8"`**。Apache HttpClient 4.x 的 `BasicScheme` 没收到 `charset` 参数时按 ISO-8859-1 编码凭据，与本代理比较用的 UTF-8 字节不兼容，密码含非 ASCII 时永远匹配失败。
-- **方案名与凭据之间的空白字符容忍制表符与多重空格**（兼容部分老 Jetty client 手拼头时的 `Basic\t...` 形式）。
-- **需关连接的 407 走优雅关闭**（先 `FIN` 再有界排空残留字节），避免接收队列里未读完的正文让 `close()` 发 `RST`、把刚发出的 407 冲掉——否则 Java 客户端看到的是 `Connection reset` 而不是 `407`，不会触发重试。
-- **每连接质询次数封顶**（默认 5 轮）。缺失凭据不计数后，单连接可能被用来无限拿 407 空转占坑，用连接级上限补回旧实现由限速器提供的隐式上界；正常客户端 1 轮即完成重试，不受影响。
-
-Nexus 3 侧只需在 `System → HTTP Proxy Settings` 里勾选 `Enable HTTP Authentication` 并填写 `SOCKS_USER` / `SOCKS_PASSWORD`，无需预先启用 preemptive auth，也不依赖任何 Nexus 侧适配。
 
 ### 功能特性
 - [X] 通过远程SSH代理建立隧道
@@ -155,7 +95,7 @@ Nexus 3 侧只需在 `System → HTTP Proxy Settings` 里勾选 `Enable HTTP Aut
 - [X] 强制走隧道域名配置(`-force-domain`)，用于抵消直连规则的误伤（如 `geosite:cn` 收录 `googleapis.cn` 导致 Google Play 更新失效）
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口
 - [X] 周期性运行统计日志（每 5 分钟输出活跃/累计连接数与上下行字节），逐连接日志可用 `LOG_LEVEL=debug` 打开
-- [X] 并发连接双维度上限（默认全局 256 / 单 IP 32，SOCKS5 与 HTTP 共享配额，可用 `MAX_CONNS` / `MAX_CONNS_PER_IP` 调整，`0` 表示不限制），超限直接关闭；转发缓冲改用 `sync.Pool` 复用，避免高并发下内存线性增长
+- [X] 并发连接双维度上限（默认全局 256 / 单 IP 32，SOCKS5 与 HTTP 共享配额，可用 `MAX_CONNS` / `MAX_CONNS_PER_IP` 调整，`0` 表示不限制），超限直接关闭
 - [X] SSH 会话重连指数退避（5s 起、60s 封顶，按槽位错开），服务器不可用时避免无效握手风暴与日志刷屏
 - [X] HTTP 代理兼容 Java 生态客户端（Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
 

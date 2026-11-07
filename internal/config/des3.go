@@ -7,22 +7,39 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 )
 
-// 与 Java 版 SSHConfig 完全一致的密钥与 IV；密码支持明文或最多 4 层 DES3 加密。
+// 密码支持明文或最多 4 层 DES3 加密。
+// defaultCypherKey 作为未注入主密钥时的回退值，保证开箱体验可用；
+// 部署时可通过环境变量 CIPHER_MASTER_KEY 注入自定义主密钥，使源码中的默认值不再参与加解密。
 const (
-	cypherKey = "sshCopy4rfv^UGUIYOYR^UIO"
-	cipherIV  = "01234567"
+	defaultCypherKey = "sshCopy4rfv^UGUIYOYR^UIO"
+	cipherIV         = "01234567"
+	// masterKeyEnv 主密钥环境变量名；-encode 与运行时解密都读取它，
+	// 两侧必须使用同一个值，否则密文无法解开
+	masterKeyEnv = "CIPHER_MASTER_KEY"
 	// MaxCipherLayers -encode 与运行时解密的最大层数
 	MaxCipherLayers = 4
 )
+
+// masterKey 返回当前生效的 DES3 主密钥。
+// CIPHER_MASTER_KEY 已设置且非空白时使用注入值，否则回退到内置默认密钥。
+func masterKey() string {
+	if v, ok := envLookup(masterKeyEnv); ok {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return defaultCypherKey
+}
 
 var (
 	errKeyLength  = errors.New("DES3 密钥长度非法")
 	errCipherData = errors.New("DES3 密文非法")
 )
 
-// EncryptOnce 按 Java 版 DES3Util.encode 加密一层（DESede/CBC/PKCS5Padding + Base64）。
+// EncryptOnce 加密一层（DESede/CBC/PKCS5Padding + Base64）。
 func EncryptOnce(plain, secretKey string) (string, error) {
 	key, err := normalizeKey(secretKey)
 	if err != nil {
@@ -64,11 +81,12 @@ func DecryptOnce(encryptText, secretKey string) (string, error) {
 	return string(out), nil
 }
 
-// EncryptLayers 连续加密 layers 层，用于 -encode。
+// EncryptLayers 连续加密 layers 层，用于 -encode；密钥取当前生效的主密钥。
 func EncryptLayers(plain string, layers int) (string, error) {
+	key := masterKey()
 	var err error
 	for i := 0; i < layers; i++ {
-		plain, err = EncryptOnce(plain, cypherKey)
+		plain, err = EncryptOnce(plain, key)
 		if err != nil {
 			return "", err
 		}
@@ -77,11 +95,12 @@ func EncryptLayers(plain string, layers int) (string, error) {
 }
 
 // DecryptLayers 最多解密 layers 层，任何一层失败即停止并返回已解密结果。
-// 与 Java 版一致：明文密码在第一次解密失败时原样保留。
+// 明文密码在第一次解密失败时原样保留。
 func DecryptLayers(encryptText string, layers int) string {
+	key := masterKey()
 	current := encryptText
 	for i := 0; i < layers; i++ {
-		next, err := DecryptOnce(current, cypherKey)
+		next, err := DecryptOnce(current, key)
 		if err != nil {
 			return current
 		}
@@ -90,7 +109,7 @@ func DecryptLayers(encryptText string, layers int) string {
 	return current
 }
 
-// normalizeKey 与 Java 版 getSecretKey 一致：不足 24 字节用 '0' 补齐，超过则报错。
+// normalizeKey 归一化密钥：不足 24 字节用 '0' 补齐，超过则报错。
 func normalizeKey(secretKey string) ([]byte, error) {
 	if len(secretKey) > 24 {
 		return nil, errKeyLength

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"git.pi.mmxx.fun/dengming/ssh-tunnel-go/internal/logging"
+	"ssh-tunnel-go/internal/logging"
 )
 
 // 认证失败的限速参数。
