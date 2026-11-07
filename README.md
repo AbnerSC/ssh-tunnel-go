@@ -112,6 +112,8 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - [X] Windows 10/11
 - [X] Android 16
 
+### 加入群聊
+
 <p>
 <img src="docs/qrcode_qq.jpg" width="200">
 </p>
