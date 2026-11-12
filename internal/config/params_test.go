@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestParseParamsSemantics(t *testing.T) {
@@ -86,5 +87,50 @@ func TestResolverInt(t *testing.T) {
 	r = NewResolver(nil)
 	if got, err := r.Int("-p", "SSH_PORT", 22); err != nil || got != 22 {
 		t.Fatalf("默认值应为 22, got %d err %v", got, err)
+	}
+}
+
+func TestResolverDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want time.Duration
+	}{
+		{"Go 时长写法", "30m", 30 * time.Minute},
+		{"纯数字按秒", "1800", 30 * time.Minute},
+		{"零表示关闭", "0", 0},
+		{"off 表示关闭", "off", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("IDLE_TIMEOUT", c.val)
+			got, err := NewResolver(nil).Duration("-idle-timeout", "IDLE_TIMEOUT", time.Hour)
+			if err != nil {
+				t.Fatalf("解析失败: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("%s 应解析为 %v, got %v", c.val, c.want, got)
+			}
+		})
+	}
+
+	// 未配置时取默认值
+	t.Setenv("IDLE_TIMEOUT", "")
+	if got, err := NewResolver(nil).Duration("-idle-timeout", "IDLE_TIMEOUT", time.Hour); err != nil || got != time.Hour {
+		t.Fatalf("未配置时应取默认值, got %v err %v", got, err)
+	}
+
+	// 非法取值不能静默回退默认值，否则运维以为改了实际没生效
+	for _, bad := range []string{"abc", "-5", "30x"} {
+		t.Setenv("IDLE_TIMEOUT", bad)
+		if _, err := NewResolver(nil).Duration("-idle-timeout", "IDLE_TIMEOUT", time.Hour); err == nil {
+			t.Fatalf("%q 应报错", bad)
+		}
+	}
+
+	// 参数出现但没有取值
+	t.Setenv("IDLE_TIMEOUT", "")
+	if _, err := NewResolver([]string{"-idle-timeout"}).Duration("-idle-timeout", "IDLE_TIMEOUT", time.Hour); err == nil {
+		t.Fatal("缺取值应报错")
 	}
 }

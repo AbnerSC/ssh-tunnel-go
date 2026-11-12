@@ -182,6 +182,9 @@ func run(ctx context.Context, args []string) int {
 
 	// 并发连接上限必须在启动监听之前生效：Serve 只会在启动时取一次限制器
 	proxy.SetConnectionLimits(cfg.MaxConns, cfg.MaxConnsPerIP)
+	// 空闲回收时限同样在监听前设置：新连接进入转发时读取当前值，
+	// 用于回收客户端休眠/掉线留下的僵尸连接（否则 active 只增不减）
+	proxy.SetIdleTimeout(cfg.IdleTimeout)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

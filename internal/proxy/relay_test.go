@@ -109,3 +109,62 @@ func TestRelayForwardsAndHalfCloses(t *testing.T) {
 		t.Fatal("双方连接结束后 Relay 应退出")
 	}
 }
+
+// TestRelayIdleTimeoutReapsStuckConns 双向静默的连接必须被空闲看门狗回收。
+//
+// 客户端休眠/掉线/换网后本端收不到 FIN，Relay 的两个 pipe 会永久阻塞在 Read 上，
+// 线上表现为 active 长期不降、SSH 通道与并发名额被幽灵连接占满。
+func TestRelayIdleTimeoutReapsStuckConns(t *testing.T) {
+	old := currentIdleTimeout()
+	SetIdleTimeout(50 * time.Millisecond)
+	t.Cleanup(func() { SetIdleTimeout(old) })
+
+	client, relaySide := tcpPair(t)
+	defer client.Close()
+	target, targetSide := tcpPair(t)
+	defer targetSide.Close()
+
+	done := make(chan struct{})
+	go func() {
+		Relay(relaySide, target)
+		close(done)
+	}()
+
+	// 双方都不发数据，也没有关闭动作：没有空闲回收时这里会一直阻塞
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("双向空闲超时后 Relay 应关闭连接并退出")
+	}
+}
+
+// TestRelayIdleTimeoutDisabled 空闲回收设为 0 表示关闭：空闲连接不得被主动断开。
+func TestRelayIdleTimeoutDisabled(t *testing.T) {
+	old := currentIdleTimeout()
+	SetIdleTimeout(0)
+	t.Cleanup(func() { SetIdleTimeout(old) })
+
+	client, relaySide := tcpPair(t)
+	target, targetSide := tcpPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		Relay(relaySide, target)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("关闭空闲回收后不应主动断开空闲连接")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// 收尾：关闭两侧连接，Relay 应能正常退出
+	_ = client.Close()
+	_ = targetSide.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("连接关闭后 Relay 应退出")
+	}
+}

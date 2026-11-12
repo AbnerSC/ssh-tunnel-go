@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"ssh-tunnel-go/internal/console"
 	"ssh-tunnel-go/internal/direct"
@@ -49,8 +50,11 @@ type Config struct {
 	MaxConns int
 	// MaxConnsPerIP 单来源 IP 的并发连接上限；0 表示不限制
 	MaxConnsPerIP int
-	SSH           *SSHConfig
-	Direct        *direct.Rules
+	// IdleTimeout 转发阶段双向静默超过该时长即回收连接；0 表示不回收。
+	// 不回收时客户端休眠/掉线留下的僵尸连接会永久占住并发名额与 SSH 通道
+	IdleTimeout time.Duration
+	SSH         *SSHConfig
+	Direct      *direct.Rules
 }
 
 // CheckWork 是否存在可执行任务。
@@ -138,6 +142,10 @@ func Load(r *Resolver) (*Config, error) {
 		return nil, fmt.Errorf("单 IP 并发连接上限不能大于全局上限: MAX_CONNS=%d MAX_CONNS_PER_IP=%d",
 			cfg.MaxConns, cfg.MaxConnsPerIP)
 	}
+	// 空闲回收：默认 30 分钟，可用 IDLE_TIMEOUT 调整（支持 30m / 1800），0 或 off 表示不回收
+	if cfg.IdleTimeout, err = r.Duration("-idle-timeout", "IDLE_TIMEOUT", proxy.DefaultIdleTimeout); err != nil {
+		return nil, err
+	}
 
 	// 账号密码必须成对出现：只配一半时如果静默当作「不启用认证」，
 	// 代理会变成对任何人都开放的内网跳板（巡检时实测只需 SOCKS_USER 一个变量即可绕过认证）
@@ -164,6 +172,8 @@ func Load(r *Resolver) (*Config, error) {
 		logging.Info("config", "并发连接上限",
 			"maxTotal", cfg.MaxConns, "maxPerIP", cfg.MaxConnsPerIP,
 			"hint", "0 表示不限制，可用 MAX_CONNS / MAX_CONNS_PER_IP 调整")
+		logging.Info("config", "连接空闲回收", "idleTimeout", cfg.IdleTimeout.String(),
+			"hint", "双向静默超过该时长即关闭，可用 IDLE_TIMEOUT 调整，0 表示不回收")
 	}
 
 	// 无认证 + 对外监听 = 开放代理/内网跳板，默认拒绝启动；

@@ -3,6 +3,7 @@ package sshpool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -155,9 +156,20 @@ func (p *Pool) DialContext(ctx context.Context, host string, port int) (net.Conn
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// 超时说明请求已到达服务端但目标响应慢，换会话只会把超时叠加给客户端
+		// 服务端明确拒绝建通道（sshd 到目标的 TCP 连不上、或被策略禁止）：
+		// 换一条会话同样失败，直接返回，避免同一次请求在两个池位上各记一条告警。
+		// 日志里的 "ssh: rejected: connect failed (\"open failed\")" 就是这一类，
+		// 典型目标：服务端无 IPv6 出口的 v6 域名、被服务端网络阻断的站点。
+		var openErr *ssh.OpenChannelError
+		if errors.As(err, &openErr) {
+			return nil, fmt.Errorf("服务端拒绝建通道(%s)，目标在服务端侧不可达: %w", openErr.Reason, err)
+		}
+		// 超时说明请求已到达服务端但目标响应慢，换会话只会把超时叠加给客户端。
+		// 原始错误只有一个 context deadline exceeded，排障时看不出是哪个阶段超时，
+		// 这里补上时限与目标，区分「通道建连超时」与「服务端拒绝」。
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+			return nil, fmt.Errorf("SSH 通道建连超过 %s 未完成，服务端到 %s 的 TCP 未建或未响应: %w",
+				channelConnectTimeout, addr, err)
 		}
 		lastErr = err
 	}

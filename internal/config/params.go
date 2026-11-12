@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ParamFormat 定义参数解析语义：
@@ -160,4 +161,33 @@ func (r *Resolver) Int(flag, env string, def int) (int, error) {
 		return 0, fmt.Errorf("参数 %s 取值非法: %q", flag, v)
 	}
 	return n, nil
+}
+
+// Duration 解析时长配置。
+//
+// 支持 Go 时长写法（30m、1h30m）与纯数字秒数（1800）；0/off 表示关闭。
+// 纯数字按秒而不是按纳秒解释：运维手写 IDLE_TIMEOUT=1800 的意图一定是秒，
+// 若静默当成纳秒，配置会变成一个几乎立即超时的值。
+func (r *Resolver) Duration(flag, env string, def time.Duration) (time.Duration, error) {
+	if !r.Has(flag, env) {
+		return def, nil
+	}
+	v := strings.ToLower(strings.TrimSpace(r.Value(flag, env, "")))
+	switch v {
+	case "off", "none", "false", "no":
+		return 0, nil
+	case "":
+		return 0, fmt.Errorf("参数 %s 缺少取值", flag)
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			return 0, fmt.Errorf("参数 %s 不能为负数: %q", flag, v)
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("参数 %s 取值非法: %q（示例: 30m、1800、off）", flag, v)
+	}
+	return d, nil
 }

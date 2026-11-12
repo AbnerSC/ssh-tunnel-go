@@ -30,7 +30,7 @@ services:
       - SSH_PORT=22               # 服务器SSH端口
       - SSH_PASSWORD=server_pwd   # 服务器SSH密码
       - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
-      - DIRECT_DOMAIN=localhost,xxxx.fun # 直连域名
+      - DIRECT_DOMAIN=localhost,fun,xyz,top # 直连域名
       - DIRECT_CN=true
       - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn # 强制代理域名
       - SSH_KNOWN_HOSTS=/app/logs/known_hosts
@@ -62,6 +62,7 @@ services:
 | `ALLOW_UNAUTH_PUBLIC`  | 允许在非回环地址上提供**无认证**代理，默认 `false`                                                                                                                       |
 | `MAX_CONNS`            | 代理并发连接上限（全局，SOCKS5 与 HTTP 共享配额），默认 `256`，`0` 表示不限制（可选）                                                                                                      |
 | `MAX_CONNS_PER_IP`     | 单来源 IP 的并发连接上限，默认 `32`，`0` 表示不限制；不得大于 `MAX_CONNS`（可选）                                                                                                          |
+| `IDLE_TIMEOUT`         | 转发阶段双向静默超过该时长即关闭连接，用于回收客户端休眠/掉线留下的僵尸连接；默认 `30m`，支持 `30m`/`1800`（秒）写法，`0` 或 `off` 表示不回收（可选）                                      |
 | `SSH_KNOWN_HOSTS`      | 服务端主机密钥记录文件，默认工作目录下的 `known_hosts`（容器内为 `/app/logs/known_hosts`）（可选）                                                                                                      |
 | `SSH_HOST_KEY`         | 固定服务端主机密钥指纹（`SHA256:...`），可重复传参或逗号分隔多个；设置后只接受匹配的指纹 （可选）                                                                                                  |
 | `CIPHER_MASTER_KEY`    | DES3 密文主密钥，`-encode` 加密与启动解密共用；未设置时回退内置默认密钥。高安全部署建议通过 docker secrets / K8s Secret 注入自定义值，让源码里的默认密钥不参与加解密 |
@@ -98,6 +99,7 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - [X] SOCKS5 支持 IPv6 目标地址(兼容 Android 双栈网络偏好解析 AAAA 的场景，如 Google Play 下载)，需隧道服务端具备 IPv6 出口
 - [X] 周期性运行统计日志（每 5 分钟输出活跃/累计连接数与上下行字节），逐连接日志可用 `LOG_LEVEL=debug` 打开
 - [X] 并发连接双维度上限（默认全局 256 / 单 IP 32，SOCKS5 与 HTTP 共享配额，可用 `MAX_CONNS` / `MAX_CONNS_PER_IP` 调整，`0` 表示不限制），超限直接关闭
+- [X] 空闲连接回收（默认双向静默 30 分钟即关闭，可用 `IDLE_TIMEOUT` 调整，`0` 表示不回收），避免客户端休眠/掉线后的僵尸连接长期占用并发名额与 SSH 通道
 - [X] SSH 会话重连指数退避（5s 起、60s 封顶，按槽位错开），服务器不可用时避免无效握手风暴与日志刷屏
 - [X] HTTP 代理兼容 Java 生态客户端（Apache HttpClient / Jetty HttpClient / java.net.http.HttpClient）
 

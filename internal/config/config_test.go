@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"ssh-tunnel-go/internal/proxy"
 )
@@ -13,7 +14,7 @@ func clearEnv(t *testing.T) {
 	for _, key := range []string{
 		"SOCKS_PORT", "SOCKS_USER", "SOCKS_PASSWORD", "HTTP_PORT",
 		"BIND_ADDR", "ALLOW_UNAUTH_PUBLIC",
-		"MAX_CONNS", "MAX_CONNS_PER_IP",
+		"MAX_CONNS", "MAX_CONNS_PER_IP", "IDLE_TIMEOUT",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
 		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
@@ -126,6 +127,32 @@ func TestLoadEncryptedPassword(t *testing.T) {
 	}
 	if cfg.SocksPassword != "pwd123" {
 		t.Fatalf("代理密码应解密为 pwd123: %q", cfg.SocksPassword)
+	}
+}
+
+// TestLoadIdleTimeout 空闲回收时限：默认 30 分钟，支持 IDLE_TIMEOUT 覆盖与 0/off 关闭。
+func TestLoadIdleTimeout(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SOCKS_PORT", "6666")
+	t.Setenv("ALLOW_UNAUTH_PUBLIC", "true")
+
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.IdleTimeout != proxy.DefaultIdleTimeout {
+		t.Fatalf("默认空闲回收应为 %v, got %v", proxy.DefaultIdleTimeout, cfg.IdleTimeout)
+	}
+
+	t.Setenv("IDLE_TIMEOUT", "5m")
+	if cfg, err = Load(NewResolver(nil)); err != nil || cfg.IdleTimeout != 5*time.Minute {
+		t.Fatalf("IDLE_TIMEOUT=5m 解析错误: %v %v", cfg.IdleTimeout, err)
+	}
+
+	// 0 是合法取值（关闭回收），不能被当成「未配置」回退默认值
+	t.Setenv("IDLE_TIMEOUT", "0")
+	if cfg, err = Load(NewResolver(nil)); err != nil || cfg.IdleTimeout != 0 {
+		t.Fatalf("IDLE_TIMEOUT=0 应关闭回收: %v %v", cfg.IdleTimeout, err)
 	}
 }
 
