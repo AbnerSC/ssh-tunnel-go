@@ -93,7 +93,7 @@ jobs:
     name: 同步 Release 到 GitHub
     # 沿用 docker-image.yml 的同一批 runner；本任务只调用 API + curl，
     # 不需要 Docker，任何带 bash 的镜像均可运行
-    runs-on: golang
+    runs-on: base
     timeout-minutes: 20
     steps:
       - name: 准备 curl 与 jq

@@ -51,7 +51,7 @@ jobs:
   build-and-push:
     name: 构建并推送镜像到 Nexus
     # 任务只调用 docker CLI，编译在构建容器内完成
-    runs-on: golang
+    runs-on: base
     timeout-minutes: 60
     steps:
       - name: 检出代码
