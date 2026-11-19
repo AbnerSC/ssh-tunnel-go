@@ -22,4 +22,4 @@ coverage.out
 .vscode/
 
 /build
-/.qoder/test
+/.qoder/skills/test/
