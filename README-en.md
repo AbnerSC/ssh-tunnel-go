@@ -38,12 +38,12 @@ services:
       - SSH_SERVER=root@1.2.3.4         # server address and account
       - SSH_PORT=22                     # server SSH port
       - SSH_PASSWORD=server_pwd         # server SSH password
-      - SSH_POOL=8                      # SSH connection pool size, default 8, usually no need to change
+      - SSH_POOL=6                      # SSH connection pool size, default 8, usually no need to change
       - SSH_KNOWN_HOSTS=/app/logs/known_hosts # host key record file (persisted via the mounted volume)
       - SSH_HOST_KEY=                   # pinned host key fingerprint SHA256:..., comma-separated
 
       # ===== Direct / tunnel routing rules =====
-      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12 # direct IPs/CIDRs
+      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8 # direct IPs/CIDRs
       - DIRECT_DOMAIN=localhost,fun,xyz,top                # direct domains (apex-domain match)
       - DIRECT_CN=true                                     # route all Chinese domains directly; geosite names such as cn,private also work
       - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn    # force through the tunnel, takes priority over all direct rules
@@ -52,18 +52,6 @@ services:
       - LOG_FORMAT=json                 # log format: json (default) / text
       - LOG_LEVEL=info                  # log level: debug/info (default)/warn/error
       - CIPHER_MASTER_KEY=              # DES3 master key; falls back to the built-in default when empty
-
-      # ===== TUN global takeover (optional, off by default; see the note below) =====
-      # - TUN_MODE=1                            # enable global takeover
-      # - TUN_CONFIG=/app/logs/tun.json         # generated config path; empty means a temp file
-      # - TUN_UDP_POLICY=direct                 # other UDP policy: direct (default) / block
-      # - TUN_FAKEIP=true                       # fake-IP for proxied domains, default true
-      # - TUN_DNS_PROXY=tcp://8.8.8.8           # DNS resolved through the tunnel
-      # - TUN_DNS_CN=udp://223.5.5.5            # DNS for direct resolution of Chinese domains
-      # - TUN_ROUTE_EXCLUDE=                    # extra CIDRs kept out of the TUN route, comma-separated
-      # - TUN_STACK=gvisor                      # gvisor (default) / system / mixed
-      # - TUN_LOG_LEVEL=warn                    # sing-box log level
-      # - TUN_AUTO_REDIRECT=false               # Linux-only nftables acceleration
     ports:
       - 16666:6666
       - 16667:6667
@@ -164,24 +152,6 @@ application traffic -> TUN interface -> sing-box routing
 
 **Linux example**
 
-```bash
-# Prerequisites: Linux; root or CAP_NET_ADMIN; /dev/net/tun; singbox next to ssh-tunnel (already included in the image)
-sudo TUN_MODE=1 SOCKS_PORT=6666 DIRECT_CN=true MAX_CONNS=1024 MAX_CONNS_PER_IP=0 SSH_POOL=16 \
-     SSH_SERVER=root@1.2.3.4 SSH_PASSWORD=****** ./ssh-tunnel
-
-# Verify: "ip route | grep ssh-tun" shows the default-route takeover; curl ifconfig.me returns the server egress IP
-```
-
-Key systemd unit snippet:
-
-```ini
-[Service]
-Environment=TUN_MODE=1 SOCKS_PORT=6666 DIRECT_CN=true MAX_CONNS=1024 MAX_CONNS_PER_IP=0
-Environment=SSH_SERVER=root@1.2.3.4 SSH_PASSWORD=******
-ExecStart=/opt/ssh-tunnel/ssh-tunnel
-Restart=on-failure
-```
-
 Docker Compose (when TUN must cover the host network; Linux hosts only):
 
 ```yaml
@@ -203,12 +173,12 @@ services:
 
       # ===== TUN and the local SOCKS egress (required) =====
       - TUN_MODE=1                      # enable global takeover
-      - SOCKS_PORT=6666                 # the only egress for TUN; startup fails without it
-      # - HTTP_PORT=6667                # optional: keep the HTTP proxy port as well
+      - SOCKS_PORT=16666                 # the only egress for TUN; startup fails without it
+      - HTTP_PORT=16667                # optional: keep the HTTP proxy port as well
       - BIND_ADDR=127.0.0.1             # loopback only, avoiding a self-referencing loop for the socks egress
       - MAX_CONNS=1024                  # all traffic now goes through SOCKS, raise this limit
       - MAX_CONNS_PER_IP=0              # TUN traffic always comes from 127.0.0.1, so a per-IP limit caps the whole machine
-      - IDLE_TIMEOUT=30m                # reclaim zombie connections after this much silence (default 30m, 0/off disables)
+      - IDLE_TIMEOUT=5m                # reclaim zombie connections after this much silence (default 30m, 0/off disables)
       # - SOCKS_USER=tun_user           # authentication is optional on loopback; recommended on multi-user hosts
       # - SOCKS_PASSWORD=tun_pwd
 
@@ -216,7 +186,7 @@ services:
       - SSH_SERVER=root@1.2.3.4         # server address and account; when empty global traffic equals a direct connection
       - SSH_PORT=22                     # server SSH port
       - SSH_PASSWORD=server_pwd         # server SSH password
-      - SSH_POOL=16                     # more concurrency after global takeover; a slightly larger pool helps
+      - SSH_POOL=6                     # more concurrency after global takeover; a slightly larger pool helps
       - SSH_KNOWN_HOSTS=/app/logs/known_hosts # host key record file (persisted via the mounted volume)
       # - SSH_HOST_KEY=SHA256:xxxx      # pinning the host key fingerprint is recommended in production
 
@@ -244,7 +214,7 @@ services:
     volumes:
       - ./logs:/app/logs
     # Raise memory together with the connection limit: 1024 connections need about 256MB (256 need about 64MB)
-    mem_limit: 512m
+    mem_limit: 128m
 ```
 
 > Notes:

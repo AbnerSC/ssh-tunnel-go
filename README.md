@@ -38,12 +38,12 @@ services:
       - SSH_SERVER=root@1.2.3.4         # 服务器地址与账号
       - SSH_PORT=22                     # 服务器SSH端口
       - SSH_PASSWORD=server_pwd         # 服务器SSH密码
-      - SSH_POOL=8                      # SSH连接池大小，默认 8，一般无需修改
+      - SSH_POOL=6                      # SSH连接池大小，默认 8，一般无需修改
       - SSH_KNOWN_HOSTS=/app/logs/known_hosts # 主机密钥记录文件（挂载后持久化）
       - SSH_HOST_KEY=                   # 固定主机密钥指纹 SHA256:...，多个用逗号分隔
 
       # ===== 直连/隧道分流规则 =====
-      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12 # 直连IP/网段
+      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8 # 直连IP/网段
       - DIRECT_DOMAIN=localhost,fun,xyz,top                # 直连域名（主域匹配）
       - DIRECT_CN=true                                     # 国内域名全量直连，也可写 cn,private
       - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn    # 强制走隧道，优先于全部直连规则
@@ -53,20 +53,9 @@ services:
       - LOG_LEVEL=info                  # 日志级别：debug/info（默认）/warn/error
       - CIPHER_MASTER_KEY=              # DES3主密钥，留空用内置默认值；建议自定义
 
-      # ===== TUN全局接管（可选，默认关闭，开启条件见下方说明）=====
-      # - TUN_MODE=1                            # 开启全局接管
-      # - TUN_CONFIG=/app/logs/tun.json         # 生成的配置路径，留空为临时文件
-      # - TUN_UDP_POLICY=direct                 # 其余UDP策略：direct（默认）/block
-      # - TUN_FAKEIP=true                       # 被代理域名返回fake-ip，默认 true
-      # - TUN_DNS_PROXY=tcp://8.8.8.8           # 走隧道的DNS
-      # - TUN_DNS_CN=udp://223.5.5.5            # 国内域名直连解析DNS
-      # - TUN_ROUTE_EXCLUDE=                    # 额外不进TUN的网段，逗号分隔
-      # - TUN_STACK=gvisor                      # gvisor（默认）/system/mixed
-      # - TUN_LOG_LEVEL=warn                    # sing-box日志级别
-      # - TUN_AUTO_REDIRECT=false               # Linux专属nftables加速
     ports:
-      - 16666:6666
-      - 16667:6667
+      - "16666:6666"
+      - "16667:6667"
     volumes:
       - ./logs:/app/logs
     mem_limit: 128m
@@ -162,25 +151,7 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 - 局域网共存（自动）：各网卡直连的网段（LAN、docker 网桥、VPS 公网子网）自动加入 `route_exclude_address`，本机作为服务端（SSH/Web 等）的入站回程不经过 TUN，避免 mid-stream 报文被用户态协议栈 RST 导致入站连接断开；因此 **TUN 不代理与宿主机同子网的目标**
 - 已知边界：为保住 DNS 劫持与 fake-ip，系统 DNS 服务器地址会从上述网段中单独扣除（前缀拆分），这意味着**与该 DNS 地址之间的全部流量**（不仅是 53 端口）仍经 TUN，其主动访问本机的入站回程不受保护。若该主机同时提供需要直连的入站服务（如路由器/NAS 上的 SSH、SMB），把它的地址显式加入 `TUN_ROUTE_EXCLUDE`（代价：该 DNS 不再被劫持，必要时改用 `TUN_DNS_CN` 或系统解析）；系统 DNS 为回环地址（systemd-resolved 的 `127.0.0.53`、Docker 的 `127.0.0.11`）时劫持本身不生效，启动日志会给出提示
 
-**Linux 示例**
-
-```bash
-# 前置：Linux；root 或 CAP_NET_ADMIN；/dev/net/tun 存在；singbox 与 ssh-tunnel 同目录（镜像内已内置）
-sudo TUN_MODE=1 SOCKS_PORT=6666 DIRECT_CN=true MAX_CONNS=1024 MAX_CONNS_PER_IP=0 SSH_POOL=16 \
-     SSH_SERVER=root@1.2.3.4 SSH_PASSWORD=****** ./ssh-tunnel
-
-# 验证：ip route | grep ssh-tun 出现默认路由；curl ifconfig.me 返回服务器出口 IP
-```
-
-systemd 单元关键片段：
-
-```ini
-[Service]
-Environment=TUN_MODE=1 SOCKS_PORT=6666 DIRECT_CN=true MAX_CONNS=1024 MAX_CONNS_PER_IP=0
-Environment=SSH_SERVER=root@1.2.3.4 SSH_PASSWORD=******
-ExecStart=/opt/ssh-tunnel/ssh-tunnel
-Restart=on-failure
-```
+**Linux example**
 
 Docker Compose（TUN 需作用于宿主机网络时，仅 Linux 宿主机）：
 
@@ -203,12 +174,12 @@ services:
 
       # ===== TUN 与本地 SOCKS 出站（必填）=====
       - TUN_MODE=1                      # 开启全局接管
-      - SOCKS_PORT=6666                 # TUN 的唯一出站，缺省会启动失败
-      # - HTTP_PORT=6667                # 可选：同时保留 HTTP 代理端口
+      - SOCKS_PORT=16666                 # TUN 的唯一出站，缺省会启动失败
+      - HTTP_PORT=16667                # 可选：同时保留 HTTP 代理端口
       - BIND_ADDR=127.0.0.1             # 仅监听回环，避免 socks 出站形成自指回环
       - MAX_CONNS=1024                  # 全局接管后流量全部经 SOCKS，建议调大
       - MAX_CONNS_PER_IP=0              # TUN 流量来源均为 127.0.0.1，不放开会变成整机并发上限
-      - IDLE_TIMEOUT=30m                # 双向静默回收僵尸连接（默认 30m，0/off 不回收）
+      - IDLE_TIMEOUT=5m                # 双向静默回收僵尸连接（默认 30m，0/off 不回收）
       # - SOCKS_USER=tun_user           # 回环监听可不配认证；同机多用户环境建议配置
       # - SOCKS_PASSWORD=tun_pwd
 
@@ -216,13 +187,13 @@ services:
       - SSH_SERVER=root@1.2.3.4         # 服务器地址与账号；留空则全局流量等于本机直连
       - SSH_PORT=22                     # 服务器SSH端口
       - SSH_PASSWORD=server_pwd         # 服务器SSH密码
-      - SSH_POOL=16                     # 全局接管后并发升高，连接池可适当调大
+      - SSH_POOL=6                     # 全局接管后并发升高，连接池可适当调大
       - SSH_KNOWN_HOSTS=/app/logs/known_hosts # 主机密钥记录文件（挂载后持久化）
       # - SSH_HOST_KEY=SHA256:xxxx      # 生产环境建议固定主机密钥指纹
 
       # ===== 分流规则 =====
       - DIRECT_CN=true                  # 国内域名直连；未配置时 TUN 层也默认启用 cn
-      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12 # 直连IP/网段
+      - DIRECT_IP=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.1/8 # 直连IP/网段
       - DIRECT_DOMAIN=localhost,fun,xyz,top                # 直连域名（主域匹配）
       - FORCE_DOMAIN=googleapis.cn,google.cn,gstatic.cn    # 强制走隧道，优先于全部直连规则
 
@@ -244,7 +215,7 @@ services:
     volumes:
       - ./logs:/app/logs
     # 并发调大后内存同步放宽：1024 并发约需 256MB（256 并发约 64MB）
-    mem_limit: 512m
+    mem_limit: 128m
 ```
 
 > 说明：
