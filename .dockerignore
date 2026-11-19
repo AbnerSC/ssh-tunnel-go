@@ -1,4 +1,5 @@
-# 构建上下文裁剪：仅排除与编译无关的文件，go.mod/go.sum/dlc.dat 必须保留
+# 构建上下文裁剪：仅排除与编译/镜像无关的文件；
+# go.mod/go.sum/dlc.dat 与 core/sing-box-*（按架构拷入镜像）必须保留
 .git
 .gitignore
 .github

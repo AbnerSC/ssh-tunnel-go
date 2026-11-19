@@ -69,7 +69,10 @@ func clearAllEnv(t *testing.T) {
 		"MAX_CONNS", "MAX_CONNS_PER_IP",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
-		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
+		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN", "FORCE_DOMAIN",
+		"TUN_MODE", "TUN_CONFIG", "TUN_UDP_POLICY", "TUN_FAKEIP",
+		"TUN_DNS_PROXY", "TUN_DNS_CN", "TUN_ROUTE_EXCLUDE", "TUN_STACK",
+		"TUN_LOG_LEVEL", "TUN_AUTO_REDIRECT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -132,6 +135,29 @@ func TestHealthRespectsBindAddr(t *testing.T) {
 	t.Setenv("BIND_ADDR", "0.0.0.0")
 	if code := health(nil); code != 0 {
 		t.Fatalf("BIND_ADDR=0.0.0.0 时应回落到回环探测: %d", code)
+	}
+}
+
+// TestIsPublicIP 仅公网 IP 字面量触发 TUN 自指告警。
+func TestIsPublicIP(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", false},
+		{"::1", false},
+		{"localhost", false},
+		{"192.168.1.10", false},
+		{"10.0.0.8", false},
+		{"fe80::1", false},
+		{"8.8.8.8", true},
+		{"2001:db8::1", true},
+		{"[1.1.1.1]", true},
+	}
+	for _, c := range cases {
+		if got := isPublicIP(c.host); got != c.want {
+			t.Fatalf("isPublicIP(%q) = %v, want %v", c.host, got, c.want)
+		}
 	}
 }
 

@@ -17,7 +17,10 @@ func clearEnv(t *testing.T) {
 		"MAX_CONNS", "MAX_CONNS_PER_IP", "IDLE_TIMEOUT",
 		"SSH_SERVER", "SSH_PORT", "SSH_PASSWORD", "SSH_POOL",
 		"SSH_KNOWN_HOSTS", "SSH_HOST_KEY",
-		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN",
+		"DIRECT_IP", "DIRECT_DOMAIN", "DIRECT_CN", "FORCE_DOMAIN",
+		"TUN_MODE", "TUN_CONFIG", "TUN_UDP_POLICY", "TUN_FAKEIP",
+		"TUN_DNS_PROXY", "TUN_DNS_CN", "TUN_ROUTE_EXCLUDE", "TUN_STACK",
+		"TUN_LOG_LEVEL", "TUN_AUTO_REDIRECT",
 		// 主密钥同样置空，避免宿主环境注入后影响黄金向量类用例
 		"CIPHER_MASTER_KEY",
 	} {
@@ -444,5 +447,171 @@ func TestLoadRejectsInvalidConnectionLimits(t *testing.T) {
 				t.Fatalf("应报错: MAX_CONNS=%s MAX_CONNS_PER_IP=%s", c.total, c.perIP)
 			}
 		})
+	}
+}
+
+// enableTun 在可用代理配置的基础上打开 TUN 全局接管。
+func enableTun(t *testing.T) {
+	t.Helper()
+	enableProxy(t)
+	t.Setenv("TUN_MODE", "1")
+}
+
+// TestLoadTunDisabledByDefault 未开启 TUN_MODE 时保持纯代理模式。
+func TestLoadTunDisabledByDefault(t *testing.T) {
+	clearEnv(t)
+	enableProxy(t)
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.Tun != nil {
+		t.Fatal("未设置 TUN_MODE 时不应启用全局接管")
+	}
+}
+
+// TestLoadTunDefaults TUN 模式的默认值：direct UDP、fake-ip、gvisor 与默认 DNS。
+func TestLoadTunDefaults(t *testing.T) {
+	clearEnv(t)
+	enableTun(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.Tun == nil {
+		t.Fatal("TUN 配置不应为空")
+	}
+	if cfg.Tun.UDPPolicy != "direct" || !cfg.Tun.FakeIP {
+		t.Fatalf("UDP/fake-ip 默认值异常: %+v", cfg.Tun)
+	}
+	if cfg.Tun.DNSProxy != "tcp://8.8.8.8" || cfg.Tun.DNSCN != "udp://223.5.5.5" {
+		t.Fatalf("DNS 默认值异常: %+v", cfg.Tun)
+	}
+	if cfg.Tun.Stack != "gvisor" || cfg.Tun.LogLevel != "warn" {
+		t.Fatalf("Stack/LogLevel 默认值异常: %+v", cfg.Tun)
+	}
+	// 未显式配置 DIRECT_CN 时默认加载 cn 分流
+	if len(cfg.Tun.GeoSites) != 1 || cfg.Tun.GeoSites[0] != "cn" {
+		t.Fatalf("默认 geosite 应为 cn: %v", cfg.Tun.GeoSites)
+	}
+}
+
+// TestLoadTunRequiresSocksPort TUN 接管依赖本地 SOCKS 出站，缺少时直接报错。
+func TestLoadTunRequiresSocksPort(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("BIND_ADDR", "127.0.0.1")
+	t.Setenv("TUN_MODE", "1")
+	_, err := Load(NewResolver(nil))
+	if err == nil || !strings.Contains(err.Error(), "SOCKS_PORT") {
+		t.Fatalf("缺少 SOCKS_PORT 应报错: %v", err)
+	}
+}
+
+// TestLoadTunExplicitCNOff 显式 DIRECT_CN=false 时 TUN 层不加载 cn 分流。
+func TestLoadTunExplicitCNOff(t *testing.T) {
+	clearEnv(t)
+	enableTun(t)
+	t.Setenv("DIRECT_CN", "false")
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if len(cfg.Tun.GeoSites) != 0 {
+		t.Fatalf("DIRECT_CN=false 时不应加载 geosite: %v", cfg.Tun.GeoSites)
+	}
+}
+
+// TestLoadTunDefaultCNScope 未显式配置 DIRECT_CN 时，cn 直连只在 TUN 层
+// 默认启用，代理层保持原有行为（TUN 模式不改变既有代理规则）；
+// 显式 DIRECT_CN=true 时两个入口行为一致。
+func TestLoadTunDefaultCNScope(t *testing.T) {
+	clearEnv(t)
+	enableTun(t)
+	t.Setenv("SSH_SERVER", "root@1.2.3.4")
+
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if len(cfg.Tun.GeoSites) != 1 || cfg.Tun.GeoSites[0] != "cn" {
+		t.Fatalf("TUN 层应默认启用 cn: %v", cfg.Tun.GeoSites)
+	}
+	if cfg.Direct.IsDirect("baidu.com") {
+		t.Fatal("未显式 DIRECT_CN 时代理层不应直连 cn 域名（保持原有代理行为）")
+	}
+
+	// 显式开启后，TUN 与代理两个入口使用同一份 cn 列表
+	t.Setenv("DIRECT_CN", "true")
+	cfg, err = Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if !cfg.Direct.IsDirect("baidu.com") {
+		t.Fatal("显式 DIRECT_CN=true 时代理层也应直连 cn 域名")
+	}
+	if len(cfg.Tun.GeoSites) != 1 || cfg.Tun.GeoSites[0] != "cn" {
+		t.Fatalf("显式 DIRECT_CN=true 时 TUN 层应使用同一份列表: %v", cfg.Tun.GeoSites)
+	}
+}
+
+// TestLoadTunInvalidOptions 取值域校验在启动阶段完成，避免产出静默失效的配置。
+func TestLoadTunInvalidOptions(t *testing.T) {
+	cases := []struct{ name, key, value, want string }{
+		{"UDP 策略非法", "TUN_UDP_POLICY", "drop", "TUN_UDP_POLICY"},
+		{"协议栈非法", "TUN_STACK", "xx", "TUN_STACK"},
+		{"日志级别非法", "TUN_LOG_LEVEL", "verbose", "TUN_LOG_LEVEL"},
+		{"DNS 缺少协议", "TUN_DNS_PROXY", "8.8.8.8", "TUN_DNS_PROXY"},
+		{"DNS 协议不支持", "TUN_DNS_CN", "ftp://1.1.1.1", "TUN_DNS_CN"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			enableTun(t)
+			t.Setenv(c.key, c.value)
+			_, err := Load(NewResolver(nil))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("%s=%s 应报错并指明项名，实际: %v", c.key, c.value, err)
+			}
+		})
+	}
+}
+
+// TestLoadTunStackPassthrough 协议栈取值由 tun 包按平台校验，配置层只做透传。
+func TestLoadTunStackPassthrough(t *testing.T) {
+	clearEnv(t)
+	enableTun(t)
+	t.Setenv("TUN_STACK", "system")
+
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("system 栈应被接受: %v", err)
+	}
+	if cfg.Tun == nil || cfg.Tun.Stack != "system" {
+		t.Fatalf("协议栈解析异常: %+v", cfg.Tun)
+	}
+}
+
+// TestLoadTunConnectionToProxyConfig TUN 开启后原始直连输入仍保留，
+// 供 tun 包生成与代理层一致的分流规则。
+func TestLoadTunConnectionToProxyConfig(t *testing.T) {
+	clearEnv(t)
+	enableTun(t)
+	t.Setenv("DIRECT_IP", "192.168.0.0/16,10.0.0.0/8")
+	t.Setenv("DIRECT_DOMAIN", "corp.example")
+	t.Setenv("FORCE_DOMAIN", "googleapis.cn")
+	cfg, err := Load(NewResolver(nil))
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if len(cfg.DirectIPs) == 0 || len(cfg.DirectDomains) == 0 {
+		t.Fatalf("原始直连输入未保留: %+v", cfg)
+	}
+	if len(cfg.ForceDomains) != 1 || cfg.ForceDomains[0] != "googleapis.cn" {
+		t.Fatalf("FORCE_DOMAIN 未保留: %v", cfg.ForceDomains)
+	}
+	if len(cfg.Tun.GeoSites) != 1 || cfg.Tun.GeoSites[0] != "cn" {
+		t.Fatalf("显式配置的其他直连项不应影响默认 cn: %v", cfg.Tun.GeoSites)
 	}
 }

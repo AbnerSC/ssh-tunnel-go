@@ -7,6 +7,8 @@
 #   - 运行阶段基于 debian bookworm-slim（官方多架构镜像），拷贝静态二进制并安装
 #     ca-certificates；该阶段的 apt-get 以目标架构执行，跨架构构建需要 QEMU
 #     （CI 已通过 setup-qemu 提供）
+#   - sing-box 不再嵌入 Go 二进制：运行阶段按 TARGETARCH 只拷入
+#     core/sing-box-<arch> 并统一命名为 /app/singbox，程序无需判断 CPU 架构
 #
 # 安全基线（以非 root 运行）：
 #   - 运行阶段只装 ca-certificates，不装 curl/调试工具，减小攻击面
@@ -92,6 +94,12 @@ RUN groupadd -g ${APP_GID} app && \
     chmod 0750 /app/logs && \
     chmod 0600 /app/known_hosts
 
+# sing-box：按目标架构只拷入对应文件并统一命名为 singbox，
+# 程序只认固定文件名，运行时不再判断 CPU 架构。
+# --chmod/--chown 在 COPY 时一次设置，避免后续 chmod 触发整文件 copy-up 膨胀镜像层
+ARG TARGETARCH
+COPY --chown=app:app --chmod=755 core/sing-box-${TARGETARCH} /app/singbox
+
 # 入口脚本仅做 exec 转发；环境变量 -> 参数 的转换已内置在二进制中
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # Windows 下检出可能带 CRLF，构建时统一去除，避免 shebang 解析失败
@@ -117,10 +125,27 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 #   ALLOW_UNAUTH_PUBLIC -> -allow-unauth-public 允许无认证代理对外监听（默认拒绝）
 #   MAX_CONNS      -> -max-conns      代理并发连接上限（默认 256，0 表示不限制）
 #   MAX_CONNS_PER_IP -> -max-conns-per-ip 单来源 IP 并发连接上限（默认 32，0 表示不限制）
+#   IDLE_TIMEOUT   -> -idle-timeout   双向静默回收时长（默认 30m，支持 30m/1800，0/off 不回收）
 #   SSH_KNOWN_HOSTS -> -known-hosts  服务端主机密钥记录文件（默认 /app/known_hosts）
 #   SSH_HOST_KEY    -> -host-key     固定服务端主机密钥指纹（SHA256:...，可逗号分隔多个）
 #   CIPHER_MASTER_KEY -> （无对应参数）DES3 密文主密钥，-encode 与启动解密共用；
 #                        未设置时回退内置默认密钥
+#   TUN_*          -> 全局接管（托管 sing-box 把系统流量转发到本地 SOCKS5）：
+#                     TUN_MODE=1 开启；其余为 TUN_CONFIG / TUN_UDP_POLICY / TUN_FAKEIP /
+#                     TUN_DNS_PROXY / TUN_DNS_CN / TUN_ROUTE_EXCLUDE / TUN_STACK /
+#                     TUN_LOG_LEVEL / TUN_AUTO_REDIRECT，默认值见 README
+#
+# TUN 容器运行条件（缺一不可，完整 Docker Compose 示例见 README）：
+#   1. 以 root 运行：镜像默认 USER app（uid 10001），运行需 --user 0
+#   2. NET_ADMIN 权限：--cap-add NET_ADMIN，用于创建 TUN 虚拟网卡
+#   3. 挂载宿主机 TUN 设备：--device /dev/net/tun
+#   4. 共享宿主机网络：--network host，否则 TUN 仅覆盖容器自身命名空间；
+#      host 网络下端口映射失效，Docker Desktop 的 host 网络指向虚拟机，无法接管宿主机流量
+#   5. sing-box 已内置（构建时按目标架构只拷入 core/sing-box-<arch>，统一命名
+#      /app/singbox）：TUN 启动时直接调用，无需联网下载或额外挂载；其它架构
+#      （如 armv7）的镜像不包含 sing-box，TUN 启动会直接报错
+#   6. SOCKS_PORT 必填（TUN 唯一出站）；建议 BIND_ADDR=127.0.0.1、
+#      MAX_CONNS_PER_IP=0 并调大 MAX_CONNS；并发升高后同步放宽 mem_limit
 ENV SOCKS_PORT= \
     SOCKS_USER= \
     SOCKS_PASSWORD= \
@@ -129,6 +154,7 @@ ENV SOCKS_PORT= \
     ALLOW_UNAUTH_PUBLIC= \
     MAX_CONNS= \
     MAX_CONNS_PER_IP= \
+    IDLE_TIMEOUT= \
     SSH_SERVER= \
     SSH_PORT= \
     SSH_PASSWORD= \
@@ -140,6 +166,16 @@ ENV SOCKS_PORT= \
     DIRECT_DOMAIN= \
     DIRECT_CN= \
     FORCE_DOMAIN= \
+    TUN_MODE= \
+    TUN_CONFIG= \
+    TUN_UDP_POLICY= \
+    TUN_FAKEIP= \
+    TUN_DNS_PROXY= \
+    TUN_DNS_CN= \
+    TUN_ROUTE_EXCLUDE= \
+    TUN_STACK= \
+    TUN_LOG_LEVEL= \
+    TUN_AUTO_REDIRECT= \
     LOG_FORMAT= \
     LOG_LEVEL=
 

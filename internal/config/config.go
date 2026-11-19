@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -35,6 +36,29 @@ func (s *SSHConfig) Script() string {
 	return fmt.Sprintf("%s@%s:%d", s.User, s.Addr, s.Port)
 }
 
+// TunConfig TUN 全局接管配置（托管 sing-box 把系统流量转发到本地 SOCKS5）。
+type TunConfig struct {
+	// ConfigPath 生成的 sing-box 配置输出路径；空表示系统临时目录
+	ConfigPath string
+	// UDPPolicy 非 DNS/QUIC 的 UDP 处理策略：direct 或 block
+	UDPPolicy string
+	// FakeIP 是否对走代理的域名返回 fake-ip
+	FakeIP bool
+	// DNSProxy 走代理的 DNS；DNSCN 直连解析 cn 域名用的 DNS
+	DNSProxy string
+	DNSCN    string
+	// RouteExclude 额外排除的网段（SSH 服务器地址会再自动加入）
+	RouteExclude []string
+	// Stack TUN 协议栈：gvisor/system/mixed
+	Stack string
+	// LogLevel sing-box 日志级别
+	LogLevel string
+	// AutoRedirect Linux 专属 nftables 加速
+	AutoRedirect bool
+	// GeoSites TUN 层做直连分流的 geosite 列表（复用内嵌 dlc.dat）
+	GeoSites []string
+}
+
 // Config 运行配置。
 type Config struct {
 	SocksPort     int // -1 表示未启用
@@ -55,6 +79,14 @@ type Config struct {
 	IdleTimeout time.Duration
 	SSH         *SSHConfig
 	Direct      *direct.Rules
+	// Tun TUN 全局接管配置；nil 表示未启用（保持纯代理模式）
+	Tun *TunConfig
+	// 以下保留原始直连输入：TUN 模式生成 sing-box 分流规则时
+	// 复用与代理层同一套配置，避免两边行为不一致
+	DirectIPs     []string
+	DirectDomains []string
+	DirectSites   []string
+	ForceDomains  []string
 }
 
 // CheckWork 是否存在可执行任务。
@@ -193,6 +225,10 @@ func Load(r *Resolver) (*Config, error) {
 	directDomains := r.Values("-direct-domain", "DIRECT_DOMAIN")
 	directSites := readGeoSiteNames(r)
 	forceDomains := r.Values("-force-domain", "FORCE_DOMAIN")
+	cfg.DirectIPs = directIPs
+	cfg.DirectDomains = directDomains
+	cfg.DirectSites = directSites
+	cfg.ForceDomains = splitTokens(forceDomains)
 	if len(directIPs) > 0 || len(directDomains) > 0 || len(directSites) > 0 || len(forceDomains) > 0 {
 		cfg.Direct = direct.New(directIPs, directDomains)
 		cfg.Direct.SetForceDomains(forceDomains)
@@ -233,7 +269,109 @@ func Load(r *Resolver) (*Config, error) {
 			HostKeys:   splitTokens(r.Values("-host-key", "SSH_HOST_KEY")),
 		}
 	}
+	if err := loadTunConfig(cfg, r); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// loadTunConfig 解析 TUN 全局接管配置（TUN_MODE 未开启时直接返回）。
+//
+// TUN 模式依赖本地 SOCKS5 端口作为唯一出站：未配置时直接报错，
+// 避免生成一个没有出口的全局接管把本机网络切断。
+func loadTunConfig(cfg *Config, r *Resolver) error {
+	on, err := r.Bool("-tun", "TUN_MODE", false)
+	if err != nil {
+		return err
+	}
+	if !on {
+		return nil
+	}
+
+	cfg.Tun = &TunConfig{
+		ConfigPath:   strings.TrimSpace(r.Value("-tun-config", "TUN_CONFIG", "")),
+		UDPPolicy:    strings.ToLower(strings.TrimSpace(r.Value("-tun-udp-policy", "TUN_UDP_POLICY", "direct"))),
+		DNSProxy:     strings.TrimSpace(r.Value("-tun-dns-proxy", "TUN_DNS_PROXY", "tcp://8.8.8.8")),
+		DNSCN:        strings.TrimSpace(r.Value("-tun-dns-cn", "TUN_DNS_CN", "udp://223.5.5.5")),
+		Stack:        strings.ToLower(strings.TrimSpace(r.Value("-tun-stack", "TUN_STACK", "gvisor"))),
+		LogLevel:     strings.ToLower(strings.TrimSpace(r.Value("-tun-log-level", "TUN_LOG_LEVEL", "warn"))),
+		RouteExclude: splitTokens(r.Values("-tun-route-exclude", "TUN_ROUTE_EXCLUDE")),
+	}
+	if cfg.Tun.FakeIP, err = r.Bool("-tun-fakeip", "TUN_FAKEIP", true); err != nil {
+		return err
+	}
+	if cfg.Tun.AutoRedirect, err = r.Bool("-tun-auto-redirect", "TUN_AUTO_REDIRECT", false); err != nil {
+		return err
+	}
+
+	if cfg.SocksPort <= 0 {
+		return fmt.Errorf("TUN_MODE 已开启但缺少 SOCKS_PORT：全局接管依赖本地 SOCKS5 代理作为出站")
+	}
+	// TUN 的唯一出站是 127.0.0.1:SOCKS_PORT，按来源 IP 计数的上限会退化为整机上限
+	if cfg.MaxConnsPerIP > 0 {
+		logging.Warn("config", "TUN 模式下所有流量来源均为 127.0.0.1，MAX_CONNS_PER_IP 会成为整机并发上限",
+			"maxPerIP", cfg.MaxConnsPerIP, "hint", "建议设 MAX_CONNS_PER_IP=0（不限制）或与 MAX_CONNS 相同")
+	}
+	if cfg.SSH == nil {
+		logging.Warn("config", "TUN_MODE 已开启但未配置 SSH_SERVER：全局流量没有隧道出口，等同于本机直连")
+	}
+	switch cfg.Tun.UDPPolicy {
+	case "direct", "block":
+	default:
+		return fmt.Errorf("TUN_UDP_POLICY 取值非法: %q（可选 direct/block）", cfg.Tun.UDPPolicy)
+	}
+	switch cfg.Tun.Stack {
+	case "gvisor", "system", "mixed":
+	default:
+		return fmt.Errorf("TUN_STACK 取值非法: %q（可选 gvisor/system/mixed）", cfg.Tun.Stack)
+	}
+	// TUN 模式仅支持 Linux，非 Linux 平台由 tun 包在启动时直接拒绝
+	// 取值域与 tun.Options.validate 保持一致
+	switch cfg.Tun.LogLevel {
+	case "trace", "debug", "info", "warn", "error", "fatal", "panic":
+	default:
+		return fmt.Errorf("TUN_LOG_LEVEL 取值非法: %q（可选 trace/debug/info/warn/error/fatal/panic）", cfg.Tun.LogLevel)
+	}
+	if cfg.Tun.AutoRedirect && runtime.GOOS != "linux" {
+		return fmt.Errorf("TUN_AUTO_REDIRECT 仅支持 Linux 平台")
+	}
+	dnsFields := []struct{ name, value string }{
+		{"TUN_DNS_PROXY", cfg.Tun.DNSProxy},
+		{"TUN_DNS_CN", cfg.Tun.DNSCN},
+	}
+	for _, f := range dnsFields {
+		if !isSupportedDNS(f.value) {
+			return fmt.Errorf("%s 格式非法: %q（示例: tcp://8.8.8.8、udp://223.5.5.5、https://dns.google/dns-query、local）", f.name, f.value)
+		}
+	}
+	// 未显式配置 DIRECT_CN 时，TUN 层默认启用内置 cn 域名直连分流，
+	// 避免全局接管后国内流量全部绕道隧道；显式 DIRECT_CN=false 可关闭。
+	// 该默认值只作用于 TUN 入口：显式指向 SOCKS5/HTTP 端口的应用仍按原有
+	// 代理规则走隧道（TUN 模式不改变既有代理行为），需要两个入口一致时
+	// 显式设置 DIRECT_CN=true。
+	if !r.Has("-direct-cn", "DIRECT_CN") {
+		cfg.Tun.GeoSites = []string{"cn"}
+	} else {
+		cfg.Tun.GeoSites = cfg.DirectSites
+	}
+	logging.Info("config", "TUN全局接管已启用",
+		"socksPort", cfg.SocksPort, "udpPolicy", cfg.Tun.UDPPolicy,
+		"fakeip", cfg.Tun.FakeIP, "geoSites", strings.Join(cfg.Tun.GeoSites, ","))
+	return nil
+}
+
+// isSupportedDNS 校验 DNS 描述串的协议前缀，完整解析在 tun 包内完成。
+func isSupportedDNS(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	if s == "local" || s == "system" {
+		return true
+	}
+	for _, scheme := range []string{"udp://", "tcp://", "tls://", "https://"} {
+		if strings.HasPrefix(s, scheme) && len(s) > len(scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // missingAuthField 返回缺失的认证配置项名，用于错误提示。

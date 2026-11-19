@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"ssh-tunnel-go/internal/logging"
 	"ssh-tunnel-go/internal/proxy"
 	"ssh-tunnel-go/internal/sshpool"
+	"ssh-tunnel-go/internal/tun"
 )
 
 // 构建时通过 -ldflags "-X main.version=..." 注入
@@ -125,6 +127,15 @@ func probeHost(bind string) string {
 	}
 }
 
+// isPublicIP 判断探测主机是否为公网 IP 字面量（非回环、非私网、非链路本地）。
+func isPublicIP(host string) bool {
+	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return false
+	}
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+}
+
 // probe 探测本地端口是否可建立 TCP 连接。
 func probe(host string, port int) int {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 3*time.Second)
@@ -159,6 +170,12 @@ func startStatsLoop(ctx context.Context) {
 		}
 	}()
 }
+
+// tunStopWait 等待 sing-box 收尾的上限。
+//
+// 子进程需要先清理系统路由与虚拟网卡再退出；直接 os.Exit 会把
+// sing-box 变成孤儿进程，网卡和路由残留会切断本机网络。
+const tunStopWait = 15 * time.Second
 
 // bindLogAddr 返回监听地址的日志展示值。
 func bindLogAddr(addr string) string {
@@ -231,10 +248,77 @@ func run(ctx context.Context, args []string) int {
 		})
 	}
 
-	<-ctx.Done()
-	logging.Info("main", "收到退出信号，正在停止")
+	// TUN 全局接管（可选）：托管 sing-box 把系统流量经本地 SOCKS5 转发。
+	// 必须在监听成功之后启动：TUN 一旦建立，系统流量会立刻涌向 SOCKS 端口
+	var tunErr chan error
+	if cfg.Tun != nil {
+		// TUN 的 socks 出站指向 BIND_ADDR 的实际监听地址：公网地址不会被
+		// 私网直连规则命中，连接会再次进入 final proxy 形成自指回环
+		if host := probeHost(cfg.BindAddr); isPublicIP(host) {
+			logging.Warn("main", "BIND_ADDR 为公网地址，TUN 的 socks 出站将指向该地址并可能形成自指回环；TUN 模式建议使用 BIND_ADDR=127.0.0.1",
+				"socksHost", host)
+		}
+		tunErr = make(chan error, 1)
+		go func() {
+			tunErr <- tun.Run(ctx, tun.Options{
+				ConfigPath:    cfg.Tun.ConfigPath,
+				SocksHost:     probeHost(cfg.BindAddr),
+				SocksPort:     cfg.SocksPort,
+				SocksUser:     cfg.SocksUser,
+				SocksPassword: cfg.SocksPassword,
+				SSHHosts:      sshHosts(cfg.SSH),
+				DirectIPs:     cfg.DirectIPs,
+				DirectDomains: cfg.DirectDomains,
+				GeoSites:      cfg.Tun.GeoSites,
+				ForceDomains:  cfg.ForceDomains,
+				RouteExclude:  cfg.Tun.RouteExclude,
+				UDPPolicy:     cfg.Tun.UDPPolicy,
+				FakeIP:        cfg.Tun.FakeIP,
+				DNSProxy:      cfg.Tun.DNSProxy,
+				DNSCN:         cfg.Tun.DNSCN,
+				Stack:         cfg.Tun.Stack,
+				LogLevel:      cfg.Tun.LogLevel,
+				AutoRedirect:  cfg.Tun.AutoRedirect,
+			})
+		}()
+	}
+
+	// 等待退出信号；TUN 子进程异常退出时记录错误并退出（由 restarter 兜底拉起）
+	code := 0
+	select {
+	case <-ctx.Done():
+		logging.Info("main", "收到退出信号，正在停止")
+		if tunErr != nil {
+			// 等 sing-box 清理路由/网卡后再退出
+			select {
+			case err := <-tunErr:
+				if err != nil {
+					logging.Error("main", "TUN全局接管停止异常", "err", err)
+					code = 1
+				}
+			case <-time.After(tunStopWait):
+				// 兜底：tun.Run 自身已有界（约 2×5s），正常不会走到这里；
+				// 一旦超时说明收尾卡死，可能残留路由/网卡，不能按正常退出处理
+				logging.Warn("main", "等待 sing-box 收尾超时，可能残留路由/网卡", "wait", tunStopWait)
+				code = 1
+			}
+		}
+	case err := <-tunErr:
+		if err != nil {
+			logging.Error("main", "TUN全局接管失败", "err", err)
+			code = 1
+		}
+	}
 	for _, ln := range listeners {
 		_ = ln.Close()
 	}
-	return 0
+	return code
+}
+
+// sshHosts 提取 SSH 服务器地址，供 TUN 路由排除使用。
+func sshHosts(s *config.SSHConfig) []string {
+	if s == nil {
+		return nil
+	}
+	return []string{s.Addr}
 }
