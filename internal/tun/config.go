@@ -141,7 +141,15 @@ type BoxDNSServer struct {
 	ServerPort int    `json:"server_port,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Detour     string `json:"detour,omitempty"`
-	Inet4Range string `json:"inet4_range,omitempty"`
+	// DomainResolver 域名形式的服务器地址用什么解析；sing-box >= 1.12 的
+	// DNS 服务器拨号器固定为 DirectResolver，缺省会拒绝启动
+	DomainResolver *BoxDomainResolver `json:"domain_resolver,omitempty"`
+	Inet4Range     string             `json:"inet4_range,omitempty"`
+}
+
+// BoxDomainResolver 域名解析器引用（server 为 DNS 服务器 tag）。
+type BoxDomainResolver struct {
+	Server string `json:"server"`
 }
 
 // BoxDNSRule DNS 分流规则。
@@ -149,7 +157,9 @@ type BoxDNSRule struct {
 	DomainSuffix  []string `json:"domain_suffix,omitempty"`
 	Domain        []string `json:"domain,omitempty"`
 	DomainKeyword []string `json:"domain_keyword,omitempty"`
-	Server        string   `json:"server"`
+	// QueryType 按查询类型分流（如 A/AAAA），用于把 fake-ip 限定在地址记录查询上
+	QueryType []string `json:"query_type,omitempty"`
+	Server    string   `json:"server"`
 }
 
 // BoxInbound TUN 入站。
@@ -269,13 +279,22 @@ func BuildConfig(o Options) (*BoxConfig, error) {
 	forceDomains := normalizeDomains(o.ForceDomains)
 	directCIDRs := normalizeCIDRList(o.DirectIPs, "直连")
 	excludes := normalizeCIDRList(o.RouteExclude, "排除")
+	// 自动排除各网卡的局域网前缀：TUN 全量接管会把「本机作为服务端时的
+	// 回程流量」也路由进 tun0，用户态协议栈对 mid-stream 报文只能回 RST，
+	// 表现为 TUN 启动后入站连接全部断开。LAN 前缀在内核路由层直接排除后
+	// 回程走原始路径；系统 DNS 地址会从排除集合中单独扣除（前缀拆分），
+	// 保证 DNS 查询仍能进 TUN 被劫持（见 lanExcludeCIDRs）。
+	excludes = mergeLists(excludes, lanExcludeCIDRs())
 	sshCIDRs, sshDomains := splitSSHHosts(o.SSHHosts)
 
 	dnsProxy, err := parseDNSServer(o.DNSProxy, "dns-proxy", "proxy")
 	if err != nil {
 		return nil, fmt.Errorf("TUN_DNS_PROXY 配置错误: %w", err)
 	}
-	dnsCN, err := parseDNSServer(o.DNSCN, "dns-cn", "direct")
+	// dns-cn 不绑定 detour：sing-box >= 1.12 禁止 detour 指向「空 direct 出站」
+	//（启动即报 detour to an empty direct outbound makes no sense），
+	// 空 detour 的拨号语义就是直连，且同样受 TUN 自身流量标记保护，不会回环。
+	dnsCN, err := parseDNSServer(o.DNSCN, "dns-cn", "")
 	if err != nil {
 		return nil, fmt.Errorf("TUN_DNS_CN 配置错误: %w", err)
 	}
@@ -284,18 +303,22 @@ func BuildConfig(o Options) (*BoxConfig, error) {
 		dnsProxy,
 		dnsCN,
 	}
-	dnsFinal := "dns-proxy"
+	dnsRules := buildDNSRules(directDomains, forceDomains, sshDomains, cnSuffix, cnFull, cnKeywords)
 	if o.FakeIP {
 		servers = append(servers, BoxDNSServer{Type: "fakeip", Tag: "dns-fakeip", Inet4Range: fakeIPRange})
-		dnsFinal = "dns-fakeip"
+		// sing-box >= 1.12 不允许 fakeip 服务器作为默认(final)服务器：默认服务器
+		// 还要回答 MX/TXT/SVCB 等非地址类查询，必须是真实解析器（否则启动即报
+		// "default server cannot be fakeip"）。因此 final 保持 dns-proxy，
+		// 末尾用 A/AAAA 规则把未命中直连/强制规则的被代理域名交给 fake-ip。
+		dnsRules = append(dnsRules, BoxDNSRule{QueryType: []string{"A", "AAAA"}, Server: "dns-fakeip"})
 	}
 
 	cfg := &BoxConfig{
 		Log: BoxLog{Level: o.LogLevel, Timestamp: true},
 		DNS: BoxDNS{
 			Servers:  servers,
-			Rules:    buildDNSRules(directDomains, forceDomains, sshDomains, cnSuffix, cnFull, cnKeywords),
-			Final:    dnsFinal,
+			Rules:    dnsRules,
+			Final:    "dns-proxy",
 			Strategy: "prefer_ipv4",
 		},
 		Inbounds: []BoxInbound{{
@@ -330,7 +353,7 @@ func BuildConfig(o Options) (*BoxConfig, error) {
 		"socks", fmt.Sprintf("%s:%d", o.SocksHost, o.SocksPort),
 		"cnSuffix", len(cnSuffix), "cnFull", len(cnFull), "cnKeyword", len(cnKeywords),
 		"directDomains", len(directDomains), "forceDomains", len(forceDomains),
-		"sshExcludes", len(sshCIDRs)+len(sshDomains))
+		"routeExcludes", len(excludes), "sshExcludes", len(sshCIDRs)+len(sshDomains))
 	return cfg, nil
 }
 
@@ -516,6 +539,8 @@ func executableNames(paths []string) []string {
 
 // parseDNSServer 解析 DNS 描述串为 sing-box DNS server。
 // 支持 tcp://、udp://、tls://、https://（可带端口与路径）与 local/system。
+// detour 为空表示直连拨号；服务器是域名时自动补 dns-local 解析器
+// （sing-box >= 1.12 对域名形式的 DNS 服务器强制要求 domain_resolver）。
 func parseDNSServer(raw, tag, detour string) (BoxDNSServer, error) {
 	s := strings.TrimSpace(raw)
 	lower := strings.ToLower(s)
@@ -545,6 +570,7 @@ func parseDNSServer(raw, tag, detour string) (BoxDNSServer, error) {
 		if port != defPort {
 			srv.ServerPort = port
 		}
+		srv.DomainResolver = domainServerResolver(host, detour)
 		return srv, nil
 	case "https":
 		hostPart, path := rest, ""
@@ -559,10 +585,23 @@ func parseDNSServer(raw, tag, detour string) (BoxDNSServer, error) {
 		if port != 443 {
 			srv.ServerPort = port
 		}
+		srv.DomainResolver = domainServerResolver(host, detour)
 		return srv, nil
 	default:
 		return BoxDNSServer{}, fmt.Errorf("不支持的 DNS 协议 %q（支持 tcp://、udp://、tls://、https://、local）", scheme)
 	}
+}
+
+// domainServerResolver 域名形式的 DNS 服务器需要先用系统解析器解析自身地址；
+// 已绑定 detour 时拨号交给出站处理，无需额外解析器。
+func domainServerResolver(host, detour string) *BoxDomainResolver {
+	if detour != "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil
+	}
+	return &BoxDomainResolver{Server: "dns-local"}
 }
 
 // splitHostPort 拆分 host[:port]；缺省端口时使用 defPort，IPv6 字面量自动去括号。

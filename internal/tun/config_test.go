@@ -43,7 +43,8 @@ func TestBuildConfigDefaults(t *testing.T) {
 		t.Fatalf("日志配置异常: %+v", cfg.Log)
 	}
 
-	// DNS：local/tcp/udp/fakeip 四个服务器，fake-ip 为默认 final
+	// DNS：local/tcp/udp/fakeip 四个服务器；final 必须是真实解析器
+	//（sing-box >= 1.12 禁止 fakeip 作默认服务器），fake-ip 由末尾 A/AAAA 规则实现
 	types := make([]string, 0, len(cfg.DNS.Servers))
 	for _, s := range cfg.DNS.Servers {
 		types = append(types, s.Type)
@@ -54,11 +55,17 @@ func TestBuildConfigDefaults(t *testing.T) {
 	if cfg.DNS.Servers[1].Server != "8.8.8.8" || cfg.DNS.Servers[1].Detour != "proxy" {
 		t.Fatalf("dns-proxy 配置异常: %+v", cfg.DNS.Servers[1])
 	}
-	if cfg.DNS.Servers[2].Server != "223.5.5.5" || cfg.DNS.Servers[2].Detour != "direct" {
+	// dns-cn 不绑定 detour：sing-box >= 1.12 禁止 detour 指向空 direct 出站，
+	// 空 detour 本身就是直连拨号
+	if cfg.DNS.Servers[2].Server != "223.5.5.5" || cfg.DNS.Servers[2].Detour != "" {
 		t.Fatalf("dns-cn 配置异常: %+v", cfg.DNS.Servers[2])
 	}
-	if cfg.DNS.Final != "dns-fakeip" || cfg.DNS.Strategy != "prefer_ipv4" {
+	if cfg.DNS.Final != "dns-proxy" || cfg.DNS.Strategy != "prefer_ipv4" {
 		t.Fatalf("DNS final/strategy 异常: %+v", cfg.DNS)
+	}
+	fakeRule := cfg.DNS.Rules[len(cfg.DNS.Rules)-1]
+	if fakeRule.Server != "dns-fakeip" || !slices.Equal(fakeRule.QueryType, []string{"A", "AAAA"}) {
+		t.Fatalf("末尾应为 A/AAAA 走 fake-ip 的规则（否则 fakeip 服务器不生效）: %+v", fakeRule)
 	}
 	if len(cfg.DNS.Rules) == 0 || cfg.DNS.Rules[0].Server != "dns-local" {
 		t.Fatalf("首条 DNS 规则应为内网域名走 dns-local: %+v", cfg.DNS.Rules)
@@ -166,6 +173,11 @@ func TestBuildConfigFakeIPDisabled(t *testing.T) {
 	for _, s := range cfg.DNS.Servers {
 		if s.Type == "fakeip" {
 			t.Fatal("关闭 fake-ip 后不应再出现 fakeip 服务器")
+		}
+	}
+	for _, r := range cfg.DNS.Rules {
+		if r.Server == "dns-fakeip" {
+			t.Fatal("关闭 fake-ip 后不应再出现指向 dns-fakeip 的规则")
 		}
 	}
 }
@@ -350,6 +362,31 @@ func TestParseDNSServer(t *testing.T) {
 				t.Fatalf("%q detour 异常: %+v", c.raw, srv)
 			}
 		})
+	}
+}
+
+// TestParseDNSServerDomainResolver 域名形式的 DNS 服务器必须携带 domain_resolver
+// （sing-box >= 1.12 的 DNS 拨号器固定 DirectResolver，缺会拒绝启动）；
+// 已绑定 detour 或 IP 字面量时不需要。
+func TestParseDNSServerDomainResolver(t *testing.T) {
+	cases := []struct {
+		raw, detour  string
+		wantResolver bool
+	}{
+		{"https://dns.alidns.com/dns-query", "", true},
+		{"tls://dns.google", "", true},
+		{"https://dns.google/dns-query", "proxy", false},
+		{"udp://223.5.5.5", "", false},
+	}
+	for _, c := range cases {
+		srv, err := parseDNSServer(c.raw, "tag", c.detour)
+		if err != nil {
+			t.Fatalf("%q 解析失败: %v", c.raw, err)
+		}
+		got := srv.DomainResolver != nil && srv.DomainResolver.Server == "dns-local"
+		if got != c.wantResolver {
+			t.Fatalf("%q detour=%q domain_resolver=%+v，期望 %v", c.raw, c.detour, srv.DomainResolver, c.wantResolver)
+		}
 	}
 }
 

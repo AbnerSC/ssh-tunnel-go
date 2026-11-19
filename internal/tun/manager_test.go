@@ -21,10 +21,13 @@ func TestMain(m *testing.M) {
 		fakeSingBoxMain(os.Args[1:])
 		return
 	}
-	// TUN 模式仅支持 Linux，包内测试依赖 POSIX 权限位与进程语义，非 Linux 直接跳过
+	// TUN 模式仅支持 Linux，包内大多数测试依赖 POSIX 权限位与进程语义，
+	// 非 Linux 默认整包跳过；纯函数测试可通过 TUN_PURE_TESTS=1 配合 -run 筛选运行
 	if runtime.GOOS != "linux" {
-		fmt.Println("TUN 模式仅支持 Linux（当前系统: " + runtime.GOOS + "），跳过 internal/tun 测试")
-		return
+		if os.Getenv("TUN_PURE_TESTS") != "1" {
+			fmt.Println("TUN 模式仅支持 Linux（当前系统: " + runtime.GOOS + "），跳过 internal/tun 测试")
+			return
+		}
 	}
 	os.Exit(m.Run())
 }
