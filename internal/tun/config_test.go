@@ -264,6 +264,34 @@ func TestBuildConfigRouteExclude(t *testing.T) {
 	}
 }
 
+// TestBuildConfigLANExcludes 网卡直连网段自动进入 TUN 路由排除，
+// 并同时进入直连 IP 规则（路由层之外的兜底）。
+//
+// 通过替换 lanRouteExcludes 注入固定前缀，不依赖宿主网卡与 resolv.conf。
+func TestBuildConfigLANExcludes(t *testing.T) {
+	orig := lanRouteExcludes
+	lanRouteExcludes = func() []string {
+		return []string{"172.17.1.0/32", "172.17.1.2/31", "10.251.252.0/24"}
+	}
+	t.Cleanup(func() { lanRouteExcludes = orig })
+
+	cfg, err := BuildConfig(baseOptions())
+	if err != nil {
+		t.Fatalf("BuildConfig 失败: %v", err)
+	}
+	excludes := cfg.Inbounds[0].RouteExcludeAddress
+	for _, want := range []string{"172.17.1.0/32", "172.17.1.2/31", "10.251.252.0/24"} {
+		if !slices.Contains(excludes, want) {
+			t.Fatalf("自动 LAN 排除项应进入 route_exclude_address: %s 缺失于 %v", want, excludes)
+		}
+	}
+	// 自动排除项同样进入直连 IP 规则（与 TUN_ROUTE_EXCLUDE 的兜底路径一致）
+	idx := findRouteRule(cfg, func(r BoxRouteRule) bool { return slices.Contains(r.IPCIDR, "10.251.252.0/24") })
+	if idx < 0 || cfg.Route.Rules[idx].Outbound != "direct" {
+		t.Fatal("自动 LAN 排除项应同时进入直连 IP 规则")
+	}
+}
+
 // TestNormalizeCIDR 网段归一：裸 IP 补全掩码、前缀长度与点分掩码等价、
 // 带主机位的输入做掩码化，非法掩码被拒绝（与代理层 direct 规则一致）。
 func TestNormalizeCIDR(t *testing.T) {
@@ -461,6 +489,7 @@ func TestWriteConfig(t *testing.T) {
 }
 
 func TestWriteConfigAutoPath(t *testing.T) {
+	skipUnlessLinux(t)
 	cfg, err := BuildConfig(baseOptions())
 	if err != nil {
 		t.Fatalf("BuildConfig 失败: %v", err)

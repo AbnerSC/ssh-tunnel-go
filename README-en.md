@@ -147,7 +147,7 @@ application traffic -> TUN interface -> sing-box routing
 | `TUN_FAKEIP` | `true` | return fake-IPs for proxied domains so domain routing stays accurate; `false` falls back to SNI sniffing (`-tun-fakeip`) |
 | `TUN_DNS_PROXY` | `tcp://8.8.8.8` | DNS resolved through the proxy; supports `tcp://`, `udp://`, `tls://`, `https://` (`-tun-dns-proxy`) |
 | `TUN_DNS_CN` | `udp://223.5.5.5` | DNS for direct resolution of Chinese domains (`-tun-dns-cn`) |
-| `TUN_ROUTE_EXCLUDE` | empty | extra CIDRs kept out of the TUN route (comma-separated); the SSH server address is added automatically (`-tun-route-exclude`) |
+| `TUN_ROUTE_EXCLUDE` | empty | extra CIDRs kept out of the TUN route (comma-separated); the SSH server address is added automatically; directly-attached interface subnets are excluded automatically (see "Known limitation" below) (`-tun-route-exclude`) |
 | `TUN_STACK` | `gvisor` | `gvisor`/`system`/`mixed` (`-tun-stack`) |
 | `TUN_LOG_LEVEL` | `warn` | sing-box log level, forwarded into the process log (`-tun-log-level`) |
 | `TUN_AUTO_REDIRECT` | `false` | Linux-only nftables acceleration (`-tun-auto-redirect`) |
@@ -159,6 +159,8 @@ application traffic -> TUN interface -> sing-box routing
 
 - Domain routing reuses the embedded `dlc.dat`: the `cn` list is enabled by default in TUN mode unless `DIRECT_CN` is set explicitly (**TUN entry only**; applications explicitly pointed at the SOCKS5/HTTP ports keep the original proxy rules, so set `DIRECT_CN=true` if both entries should behave the same); `FORCE_DOMAIN` has the highest priority; `DIRECT_IP`/`DIRECT_DOMAIN` apply as well
 - Three layers of loop prevention: the ssh-tunnel process itself, the SSH server IP and private CIDRs are always routed directly, so proxy → TUN → proxy loops cannot happen
+- LAN coexistence (automatic): subnets directly attached to each interface (LAN, docker bridges, the VPS public subnet) are added to `route_exclude_address`, so return traffic for inbound connections served by this host (SSH/Web, etc.) never enters the TUN and cannot be RST'd by the userspace stack; consequently **TUN never proxies targets inside the host's own subnets**
+- Known limitation: to keep DNS hijacking and fake-IP working, the system DNS server address is carved out of those subnets (prefix split), which means **all traffic to and from that DNS address** (not only port 53) still goes through the TUN, and its inbound connections to this host are not protected. If that host also provides services you need to reach directly (e.g. SSH/SMB on a router/NAS), add its address to `TUN_ROUTE_EXCLUDE` explicitly (trade-off: that DNS is no longer hijacked; use `TUN_DNS_CN` or the system resolver instead); when the system DNS is a loopback address (systemd-resolved `127.0.0.53`, Docker `127.0.0.11`) hijacking does not take effect at all and a warning is logged at startup
 
 **Linux example**
 

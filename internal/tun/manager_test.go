@@ -21,14 +21,10 @@ func TestMain(m *testing.M) {
 		fakeSingBoxMain(os.Args[1:])
 		return
 	}
-	// TUN 模式仅支持 Linux，包内大多数测试依赖 POSIX 权限位与进程语义，
-	// 非 Linux 默认整包跳过；纯函数测试可通过 TUN_PURE_TESTS=1 配合 -run 筛选运行
-	if runtime.GOOS != "linux" {
-		if os.Getenv("TUN_PURE_TESTS") != "1" {
-			fmt.Println("TUN 模式仅支持 Linux（当前系统: " + runtime.GOOS + "），跳过 internal/tun 测试")
-			return
-		}
-	}
+	// 配置生成默认会枚举宿主网卡与 resolv.conf，测试中固定为空，
+	// 保证 BuildConfig 结果与运行环境无关（集成路径由
+	// TestBuildConfigLANExcludes 注入固定前缀覆盖）。
+	lanRouteExcludes = func() []string { return nil }
 	os.Exit(m.Run())
 }
 
@@ -89,6 +85,14 @@ func stubEmbeddedBinary(t *testing.T) {
 	t.Cleanup(func() { binaryPathHook = nil })
 }
 
+// skipUnlessLinux 在非 Linux 平台跳过依赖 POSIX 权限位/可执行文件语义的用例。
+func skipUnlessLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("TUN 模式仅支持 Linux，跳过该用例")
+	}
+}
+
 // skipWithoutTunDevice 在非 Linux 或无 /dev/net/tun 环境跳过需要启动子进程的用例。
 func skipWithoutTunDevice(t *testing.T) {
 	t.Helper()
@@ -121,6 +125,7 @@ func TestParseVersion(t *testing.T) {
 
 // TestCheckVersionTooOld 假二进制输出低版本时，checkVersion 应拒绝并给出可诊断错误。
 func TestCheckVersionTooOld(t *testing.T) {
+	skipUnlessLinux(t)
 	t.Setenv("FAKE_SINGBOX_MODE", "1")
 	t.Setenv("FAKE_SINGBOX_VERSION", "1.11.9")
 	err := checkVersion(context.Background(), fakeBinPath(t))
@@ -131,6 +136,7 @@ func TestCheckVersionTooOld(t *testing.T) {
 
 // TestCheckVersionCanceledContext 父 ctx 已取消时版本探测应立即失败，不再拉起子进程。
 func TestCheckVersionCanceledContext(t *testing.T) {
+	skipUnlessLinux(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := checkVersion(ctx, fakeBinPath(t)); err == nil {

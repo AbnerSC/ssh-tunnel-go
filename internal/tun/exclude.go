@@ -23,16 +23,21 @@ const (
 // 从 TUN 路由中挖掉。
 var virtualIfacePrefixes = []string{"tun", "tap", "utun", "wg", "tailscale", "zt"}
 
-// lanExcludeCIDRs 生成局域网前缀的路由排除列表（CIDR 字符串）。
+// lanRouteExcludes 生成网卡直连网段的路由排除；独立变量便于测试注入固定
+// 前缀，避免 BuildConfig 的结果依赖宿主网卡与 /etc/resolv.conf。
+var lanRouteExcludes = lanExcludeCIDRs
+
+// lanExcludeCIDRs 生成网卡直连网段的路由排除列表（CIDR 字符串）。
 //
 // TUN 全量接管（auto_route + 默认 0/0 路由）会把本机所有出站流量都送进
 // tun0，其中也包括本机作为服务端（sshd、Web 服务等）返回给局域网客户端的
 // 回程流量。这些连接不经过 sing-box 的入站，用户态协议栈收到 mid-stream
 // 报文只能回 RST，表现为 TUN 启动后所有入站连接立即断开。
 //
-// 因此在路由层排除各网卡所在的局域网前缀，让回程流量走原始路径；
-// 系统 DNS 服务器地址是例外：DNS 劫持依赖查询报文进入 TUN，需要从
-// LAN 前缀中把 DNS 地址单独扣除（前缀拆分），同时保住 DNS 分流与 fake-ip。
+// 因此在路由层排除各网卡直连的网段（LAN、docker 网桥、VPS 公网子网），
+// 让回程流量走原始路径；系统 DNS 服务器地址是例外：DNS 劫持依赖查询报文
+// 进入 TUN，需要从网段中把 DNS 地址单独扣除（前缀拆分），同时保住 DNS
+// 分流与 fake-ip。扣除的代价见 routeExcludes 的返回说明。
 func lanExcludeCIDRs() []string {
 	if runtime.GOOS != "linux" {
 		// TUN 模式仅支持 Linux，其他平台保持配置生成行为不变
@@ -43,21 +48,48 @@ func lanExcludeCIDRs() []string {
 		return nil
 	}
 	dns := systemDNSServers(localAddrs())
-	var out []string
-	for _, p := range prefixes {
-		for _, part := range subtractAddrs(p, dns) {
-			out = append(out, part.String())
-		}
+	excludes, kept := routeExcludes(prefixes, dns)
+	logging.Debug("tun", "网卡直连网段已加入路由排除",
+		"prefixes", joinPrefixes(prefixes), "dns", joinAddrs(dns), "kept", joinAddrs(kept))
+	logging.Info("tun", "网卡直连网段已加入路由排除", "prefixes", len(prefixes), "excludes", len(excludes))
+	if len(kept) > 0 {
+		// 路由表没有端口维度：为保住 53 端口而扣除的 /32 会把该地址的全部
+		// 流量留在 TUN 内，其主动访问本机的入站回程也不再受直连保护。
+		logging.Warn("tun", "系统DNS地址保留在TUN内：与其之间的全部流量仍经TUN（含其访问本机的入站回程）；如需该主机完全直连，请把地址加入TUN_ROUTE_EXCLUDE（代价是该DNS不再被劫持）",
+			"dns", joinAddrs(kept))
 	}
-	logging.Info("tun", "局域网前缀已加入路由排除",
-		"lanPrefixes", joinPrefixes(prefixes), "excludes", len(out), "keptDNS", joinAddrs(dns))
-	return out
+	return excludes
 }
 
-// lanPrefixes 枚举本机 UP 状态、非回环、非隧道网卡的地址前缀。
+// routeExcludes 把网卡直连前缀转换为路由排除列表。
+//
+// 返回的 kept 是从前缀中被扣除（保留进 TUN）的 DNS 地址：路由层没有端口
+// 概念，扣除 /32 意味着与该地址之间的全部流量（不仅是 53 端口）仍然经过
+// TUN，其主动访问本机的入站回程也会被用户态协议栈接管。调用方应对 kept
+// 输出告警，提示可用 TUN_ROUTE_EXCLUDE 显式恢复整段排除。
+func routeExcludes(prefixes []netip.Prefix, dns []netip.Addr) (excludes []string, kept []netip.Addr) {
+	seen := make(map[netip.Addr]struct{})
+	for _, p := range prefixes {
+		for _, part := range subtractAddrs(p, dns) {
+			excludes = append(excludes, part.String())
+		}
+		for _, a := range dns {
+			if _, dup := seen[a]; dup || !p.Contains(a) {
+				continue
+			}
+			seen[a] = struct{}{}
+			kept = append(kept, a)
+		}
+	}
+	return excludes, kept
+}
+
+// lanPrefixes 枚举本机 UP 状态、非回环、非隧道网卡的直连网段。
 //
 // 包括物理网卡与 docker 网桥等虚拟网桥：它们的流量同样不应该被 TUN
-// 抓走（容器网络、宿主机到容器的访问依赖原始路由）。
+// 抓走（容器网络、宿主机到容器的访问依赖原始路由）。注意 VPS 上的公网
+// /24、ISP 分配的 IPv6 /64 同样属于直连网段，会被整段排除——TUN 不代理
+// 与宿主机同子网的目标。
 func lanPrefixes() []netip.Prefix {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -109,6 +141,13 @@ func ifacePrefix(a net.Addr) (netip.Prefix, bool) {
 	}
 	ones, bits := ipnet.Mask.Size()
 	if ones <= 0 || bits == 0 {
+		return netip.Prefix{}, false
+	}
+	// 掩码位长必须与地址族一致（如 4 字节地址配 128 位掩码），否则该地址
+	// 会被静默跳过、对应网卡整块失去排除保护，这里显式拦截并留下线索
+	if bits != addr.BitLen() {
+		logging.Debug("tun", "接口掩码位长与地址族不一致，跳过该地址",
+			"addr", addr, "ones", ones, "bits", bits)
 		return netip.Prefix{}, false
 	}
 	prefix, err := addr.Prefix(ones)

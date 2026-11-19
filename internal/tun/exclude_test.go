@@ -126,6 +126,98 @@ func TestSubtractAddrsIPv6(t *testing.T) {
 	}
 }
 
+// TestRouteExcludes 纯函数：网段扣除 DNS 地址后返回补集，并报告被保留
+// 进 TUN 的 DNS 地址（调用方据此输出边界告警）。
+func TestRouteExcludes(t *testing.T) {
+	prefixes := []netip.Prefix{
+		netip.MustParsePrefix("172.17.1.0/24"),
+		netip.MustParsePrefix("10.251.252.0/24"),
+		netip.MustParsePrefix("2001:db8::/120"),
+	}
+	dns := []netip.Addr{
+		netip.MustParseAddr("172.17.1.213"), // 落在第一个网段
+		netip.MustParseAddr("2001:db8::53"), // 落在第三个网段
+		netip.MustParseAddr("8.8.8.8"),      // 不在任何网段，不应被报告
+	}
+	excludes, kept := routeExcludes(prefixes, dns)
+	wantKept := []netip.Addr{netip.MustParseAddr("172.17.1.213"), netip.MustParseAddr("2001:db8::53")}
+	if !slices.Equal(kept, wantKept) {
+		t.Fatalf("kept 应仅包含落在网段内的 DNS: %v，期望 %v", kept, wantKept)
+	}
+	for _, s := range []string{"172.17.1.213", "2001:db8::53"} {
+		addr := netip.MustParseAddr(s)
+		for _, e := range excludes {
+			if netip.MustParsePrefix(e).Contains(addr) {
+				t.Fatalf("kept DNS %s 不应出现在排除列表: %v", s, excludes)
+			}
+		}
+	}
+	// 无 DNS 相交的网段应整段保留为排除项
+	if !slices.Contains(excludes, "10.251.252.0/24") {
+		t.Fatalf("无 DNS 的网段应整段排除: %v", excludes)
+	}
+	// 拆分后的补集仍覆盖同网段内的其他地址
+	if !slices.Contains(excludes, "172.17.1.0/25") {
+		t.Fatalf("DNS 之外的地址应仍被排除: %v", excludes)
+	}
+}
+
+// TestSubtractAddrsIPv6MultiDNS 同一 IPv6 /64 内扣除多个 DNS 地址：
+// 补集应逐地址覆盖除 DNS 外的全部 2^64-2 个地址，且各前缀互不重叠。
+func TestSubtractAddrsIPv6MultiDNS(t *testing.T) {
+	p := netip.MustParsePrefix("2001:db8::/64")
+	dns1 := netip.MustParseAddr("2001:db8::53")
+	dns2 := netip.MustParseAddr("2001:db8:0:0:ffff::1")
+	got := subtractAddrs(p, []netip.Addr{dns1, dns2})
+	var total uint64
+	for i, part := range got {
+		if part.Contains(dns1) || part.Contains(dns2) {
+			t.Fatalf("补集不应包含扣除地址: %s", part)
+		}
+		total += uint64(1) << (128 - part.Bits())
+		for _, other := range got[i+1:] {
+			if part.Contains(other.Addr()) || other.Contains(part.Addr()) {
+				t.Fatalf("补集前缀不应重叠: %s / %s", part, other)
+			}
+		}
+	}
+	if want := ^uint64(0) - 1; total != want {
+		t.Fatalf("补集地址数量异常: %d，期望 %d", total, want)
+	}
+}
+
+// TestSubtractAddrsNetworkBroadcast 扣除网络地址与广播地址（多 DNS 位于
+// /24 两端）时，补集恰好覆盖中间 254 个地址。
+func TestSubtractAddrsNetworkBroadcast(t *testing.T) {
+	p := netip.MustParsePrefix("10.0.0.0/24")
+	addrs := []netip.Addr{netip.MustParseAddr("10.0.0.0"), netip.MustParseAddr("10.0.0.255")}
+	got := subtractAddrs(p, addrs)
+	var covered int
+	for i := 0; i < 256; i++ {
+		addr := netip.AddrFrom4([4]byte{10, 0, 0, byte(i)})
+		in := false
+		for _, part := range got {
+			if part.Contains(addr) {
+				in = true
+				break
+			}
+		}
+		if i == 0 || i == 255 {
+			if in {
+				t.Fatalf("扣除地址 %s 不应出现在补集中", addr)
+			}
+			continue
+		}
+		if !in {
+			t.Fatalf("地址 %s 缺失于补集", addr)
+		}
+		covered++
+	}
+	if covered != 254 {
+		t.Fatalf("补集覆盖数量异常: %d", covered)
+	}
+}
+
 // TestHalfStart 验证前缀右半起点计算（v4/v6）。
 func TestHalfStart(t *testing.T) {
 	cases := []struct {
@@ -168,6 +260,8 @@ func TestIfacePrefix(t *testing.T) {
 		{"v4 /31", mk("10.1.2.3", 31, 32), "", false},
 		{"v6 /64", mk("2408:8207:1234:5678::1", 64, 128), "2408:8207:1234:5678::/64", true},
 		{"v6 /128", mk("2001:db8::1", 128, 128), "", false},
+		{"v4 地址配 v6 掩码", mk("10.1.2.3", 24, 128), "", false},
+		{"v4 掩码长度超过地址族", &net.IPNet{IP: net.ParseIP("10.1.2.3").To4(), Mask: net.CIDRMask(48, 128)}, "", false},
 	}
 	for _, c := range cases {
 		got, ok := ifacePrefix(c.ipn)
@@ -211,6 +305,17 @@ options edns0
 	want := []netip.Addr{netip.MustParseAddr("172.17.1.1"), netip.MustParseAddr("8.8.8.8")}
 	if !slices.Equal(got, want) {
 		t.Fatalf("解析结果异常: %v，期望 %v", got, want)
+	}
+}
+
+// TestParseResolvConfGlobalIPv6 全局 IPv6 nameserver 会走「前缀扣除」路径，
+// 必须保留在返回列表中（link-local 除外）。
+func TestParseResolvConfGlobalIPv6(t *testing.T) {
+	content := "nameserver 2400:3200::1\nnameserver 2400:3200::1\nnameserver fe80::1\n"
+	got := parseResolvConf(content, nil)
+	want := []netip.Addr{netip.MustParseAddr("2400:3200::1")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("全局 IPv6 nameserver 应被保留且去重: %v", got)
 	}
 }
 

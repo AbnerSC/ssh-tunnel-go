@@ -279,12 +279,14 @@ func BuildConfig(o Options) (*BoxConfig, error) {
 	forceDomains := normalizeDomains(o.ForceDomains)
 	directCIDRs := normalizeCIDRList(o.DirectIPs, "直连")
 	excludes := normalizeCIDRList(o.RouteExclude, "排除")
-	// 自动排除各网卡的局域网前缀：TUN 全量接管会把「本机作为服务端时的
-	// 回程流量」也路由进 tun0，用户态协议栈对 mid-stream 报文只能回 RST，
-	// 表现为 TUN 启动后入站连接全部断开。LAN 前缀在内核路由层直接排除后
-	// 回程走原始路径；系统 DNS 地址会从排除集合中单独扣除（前缀拆分），
-	// 保证 DNS 查询仍能进 TUN 被劫持（见 lanExcludeCIDRs）。
-	excludes = mergeLists(excludes, lanExcludeCIDRs())
+	// 自动排除各网卡直连的网段（LAN、docker 网桥、VPS 公网子网等）：
+	// TUN 全量接管会把「本机作为服务端时的回程流量」也路由进 tun0，
+	// 用户态协议栈对 mid-stream 报文只能回 RST，表现为 TUN 启动后入站
+	// 连接全部断开。网段在内核路由层直接排除后回程走原始路径；系统
+	// DNS 地址会从前缀中单独扣除（前缀拆分），保证 DNS 查询仍能进 TUN
+	// 被劫持。注意：扣除后该 DNS 地址的「全部流量」仍经 TUN（路由层无
+	// 端口概念），边界与逃生口见 lanRouteExcludes 日志及 README。
+	excludes = mergeLists(excludes, lanRouteExcludes())
 	sshCIDRs, sshDomains := splitSSHHosts(o.SSHHosts)
 
 	dnsProxy, err := parseDNSServer(o.DNSProxy, "dns-proxy", "proxy")

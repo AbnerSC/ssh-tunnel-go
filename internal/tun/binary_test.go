@@ -29,6 +29,7 @@ func TestResolveSingBoxHook(t *testing.T) {
 // TestLocateSingBoxBesideExecutable 程序同目录存在可执行的 singbox 时直接使用，
 // 文件名固定，不再按 CPU 架构区分。
 func TestLocateSingBoxBesideExecutable(t *testing.T) {
+	skipUnlessLinux(t)
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "ssh-tunnel")
 	writeTestFile(t, exe, "exe", 0o755)
@@ -43,6 +44,7 @@ func TestLocateSingBoxBesideExecutable(t *testing.T) {
 
 // TestLocateSingBoxIgnoresNonExecutable 同目录的普通文件（无执行位）不能当成 sing-box 使用。
 func TestLocateSingBoxIgnoresNonExecutable(t *testing.T) {
+	skipUnlessLinux(t)
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "ssh-tunnel")
 	writeTestFile(t, exe, "exe", 0o755)
@@ -56,6 +58,7 @@ func TestLocateSingBoxIgnoresNonExecutable(t *testing.T) {
 
 // TestLocateSingBoxFallsBackToPath 同目录未命中时回退 PATH 查找。
 func TestLocateSingBoxFallsBackToPath(t *testing.T) {
+	skipUnlessLinux(t)
 	exeDir := t.TempDir()
 	exe := filepath.Join(exeDir, "ssh-tunnel")
 	writeTestFile(t, exe, "exe", 0o755)

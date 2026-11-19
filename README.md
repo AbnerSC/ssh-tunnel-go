@@ -147,7 +147,7 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 | `TUN_FAKEIP` | `true` | 被代理域名返回 fake-ip，保证域名分流精准；`false` 回退 SNI 嗅探（`-tun-fakeip`） |
 | `TUN_DNS_PROXY` | `tcp://8.8.8.8` | 走代理的 DNS，支持 `tcp://`、`udp://`、`tls://`、`https://`（`-tun-dns-proxy`） |
 | `TUN_DNS_CN` | `udp://223.5.5.5` | 国内域名直连解析用的 DNS（`-tun-dns-cn`） |
-| `TUN_ROUTE_EXCLUDE` | 空 | 追加不进 TUN 的网段（逗号分隔），SSH 服务器地址自动加入（`-tun-route-exclude`） |
+| `TUN_ROUTE_EXCLUDE` | 空 | 追加不进 TUN 的网段（逗号分隔），SSH 服务器地址自动加入；网卡直连网段自动排除（见下方「已知边界」）（`-tun-route-exclude`） |
 | `TUN_STACK` | `gvisor` | `gvisor`/`system`/`mixed`（`-tun-stack`） |
 | `TUN_LOG_LEVEL` | `warn` | sing-box 日志级别，输出透传到程序日志（`-tun-log-level`） |
 | `TUN_AUTO_REDIRECT` | `false` | Linux 专属 nftables 加速（`-tun-auto-redirect`） |
@@ -159,6 +159,8 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 
 - 域名分流复用内置 `dlc.dat`：`DIRECT_CN` 未显式配置时 TUN 层默认启用 `cn` 列表直连（该默认值**仅作用于 TUN 入口**，显式指向 SOCKS5/HTTP 端口的应用仍按原有规则走隧道；需要两个入口行为一致时显式设置 `DIRECT_CN=true`），`FORCE_DOMAIN` 优先级最高，`DIRECT_IP`/`DIRECT_DOMAIN` 同样生效
 - 三层防回环：ssh-tunnel 自身进程、SSH 服务器 IP、私网段默认直连，避免 代理 → TUN → 代理 死循环
+- 局域网共存（自动）：各网卡直连的网段（LAN、docker 网桥、VPS 公网子网）自动加入 `route_exclude_address`，本机作为服务端（SSH/Web 等）的入站回程不经过 TUN，避免 mid-stream 报文被用户态协议栈 RST 导致入站连接断开；因此 **TUN 不代理与宿主机同子网的目标**
+- 已知边界：为保住 DNS 劫持与 fake-ip，系统 DNS 服务器地址会从上述网段中单独扣除（前缀拆分），这意味着**与该 DNS 地址之间的全部流量**（不仅是 53 端口）仍经 TUN，其主动访问本机的入站回程不受保护。若该主机同时提供需要直连的入站服务（如路由器/NAS 上的 SSH、SMB），把它的地址显式加入 `TUN_ROUTE_EXCLUDE`（代价：该 DNS 不再被劫持，必要时改用 `TUN_DNS_CN` 或系统解析）；系统 DNS 为回环地址（systemd-resolved 的 `127.0.0.53`、Docker 的 `127.0.0.11`）时劫持本身不生效，启动日志会给出提示
 
 **Linux 示例**
 
