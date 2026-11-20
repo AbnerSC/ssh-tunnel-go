@@ -134,7 +134,7 @@ application traffic -> TUN interface -> sing-box routing
 | `TUN_UDP_POLICY` | `direct` | UDP other than DNS/QUIC: `direct` allows it, `block` rejects it (`-tun-udp-policy`) |
 | `TUN_FAKEIP` | `true` | return fake-IPs for proxied domains so domain routing stays accurate; `false` falls back to SNI sniffing (`-tun-fakeip`) |
 | `TUN_DNS_PROXY` | `tcp://8.8.8.8` | DNS resolved through the proxy; supports `tcp://`, `udp://`, `tls://`, `https://` (`-tun-dns-proxy`) |
-| `TUN_DNS_CN` | `udp://223.5.5.5` | DNS for direct resolution of Chinese domains (`-tun-dns-cn`) |
+| `TUN_DNS_CN` | `udp://223.5.5.5` | DNS for direct resolution of Chinese domains (`-tun-dns-cn`); if you see `lookup ... i/o timeout`, switch to a reachable internal DNS or `tcp://223.5.5.5` |
 | `TUN_ROUTE_EXCLUDE` | empty | extra CIDRs kept out of the TUN route (comma-separated); the SSH server address is added automatically; directly-attached interface subnets are excluded automatically (see "Known limitation" below) (`-tun-route-exclude`) |
 | `TUN_STACK` | `gvisor` | `gvisor`/`system`/`mixed` (`-tun-stack`) |
 | `TUN_LOG_LEVEL` | `warn` | sing-box log level, forwarded into the process log (`-tun-log-level`) |
@@ -234,6 +234,7 @@ services:
 | application-level DoH | goes through TCP 443 inside the tunnel (routing rules do not apply but connectivity is kept); consider disabling DoH in Firefox and similar browsers |
 
 - **Troubleshooting**
+  - `lookup <host>: i/o timeout` for a target that matches direct rules means the local DNS path is unavailable: in TUN mode, when an application explicitly uses the proxy, direct domains are resolved locally (Chinese domains via `TUN_DNS_CN`, everything else via the system resolver). Make sure `TUN_DNS_CN` is reachable on your network (an internal DNS or `tcp://223.5.5.5` works well); resolution and connection setup are timed separately (lookups get their own 10s budget, covering the Go resolver retry window instead of being cut off by the 3s dial timeout), and results are cached for 60s, coalesced, and fall back to the last good result, so a single upstream hiccup no longer breaks connections
   - Inspect the generated config: by default a random `ssh-tunnel-tun-*.json` in the system temp dir, deleted when the process exits; set `TUN_CONFIG` to a fixed path to keep it
   - sing-box output is forwarded line by line into the process log; set `TUN_LOG_LEVEL=debug` to debug routing
   - “sing-box not found (singbox)”: rename the sing-box binary for the matching architecture to `singbox` and place it next to the executable (the image already provides `/app/singbox`), or install it into `PATH`

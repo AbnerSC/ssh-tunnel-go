@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"time"
@@ -39,16 +40,55 @@ type Dialer interface {
 type LocalDialer struct {
 	// Timeout 建连超时
 	Timeout time.Duration
+	// Resolver 直连域名解析缓存；nil 使用进程级共享实例
+	Resolver *Resolver
 }
 
 // DialContext 实现 Dialer。
+//
+// 解析与建连分开计时：域名解析要覆盖 DNS 重试窗口（见 Resolver），
+// 建连超时只约束 TCP 握手，不能把两者绑在同一个 3s 上。解析完成后
+// 逐个地址尝试，避免把已解析的域名再交给 Dialer 二次解析；
+// 所有地址共享同一份建连预算，避免域名解析出十几个地址时把总耗时
+// 放大成「地址数 × 超时」。
 func (d LocalDialer) DialContext(ctx context.Context, host string, port int) (net.Conn, error) {
 	timeout := d.Timeout
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	dialer := net.Dialer{Timeout: timeout, KeepAlive: 15 * time.Second}
-	return dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	addrs, err := d.resolver().Lookup(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("dial tcp: %w", err)
+	}
+
+	// 建连预算独立于解析预算：解析已在上一步消耗掉自己的时限，
+	// 这里只给握手留 timeout，且多个地址共用。
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	dialer := net.Dialer{KeepAlive: 15 * time.Second}
+	var lastErr error
+	for _, addr := range addrs {
+		conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(addr.String(), strconv.Itoa(port)))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if dialCtx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("dial tcp: %s 无可用地址", net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	return nil, lastErr
+}
+
+// resolver 返回使用的解析器：优先显式注入，未注入时用进程级共享缓存。
+func (d LocalDialer) resolver() *Resolver {
+	if d.Resolver != nil {
+		return d.Resolver
+	}
+	return defaultResolver
 }
 
 // Route 按直连规则在「本地直连」与「SSH 隧道」之间分流。

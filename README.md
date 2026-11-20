@@ -135,7 +135,7 @@ curl -x http://127.0.0.1:6667 https://www.google.com
 | `TUN_UDP_POLICY` | `direct` | 非 DNS/QUIC 的 UDP：`direct` 直连放行 / `block` 拒绝（`-tun-udp-policy`） |
 | `TUN_FAKEIP` | `true` | 被代理域名返回 fake-ip，保证域名分流精准；`false` 回退 SNI 嗅探（`-tun-fakeip`） |
 | `TUN_DNS_PROXY` | `tcp://8.8.8.8` | 走代理的 DNS，支持 `tcp://`、`udp://`、`tls://`、`https://`（`-tun-dns-proxy`） |
-| `TUN_DNS_CN` | `udp://223.5.5.5` | 国内域名直连解析用的 DNS（`-tun-dns-cn`） |
+| `TUN_DNS_CN` | `udp://223.5.5.5` | 国内域名直连解析用的 DNS（`-tun-dns-cn`）；出现 `lookup ... i/o timeout` 时改成当前网络可达的内网 DNS 或 `tcp://223.5.5.5` |
 | `TUN_ROUTE_EXCLUDE` | 空 | 追加不进 TUN 的网段（逗号分隔），SSH 服务器地址自动加入；网卡直连网段自动排除（见下方「已知边界」）（`-tun-route-exclude`） |
 | `TUN_STACK` | `gvisor` | `gvisor`/`system`/`mixed`（`-tun-stack`） |
 | `TUN_LOG_LEVEL` | `warn` | sing-box 日志级别，输出透传到程序日志（`-tun-log-level`） |
@@ -235,6 +235,7 @@ services:
 | 应用显式 DoH | 走 TCP 443 进隧道（分流不生效但不会断网），建议关闭 Firefox 等浏览器的 DoH |
 
 - **排障**
+  - 日志出现 `lookup <host>: i/o timeout` 且该目标命中直连规则：本机 DNS 链路不通——TUN 模式下应用显式配置代理时，直连域名由本机解析（国内域名走 `TUN_DNS_CN`，其余走系统解析器）。先确认 `TUN_DNS_CN` 在当前网络可达（可换内网 DNS 或 `tcp://223.5.5.5`）；程序已把直连域名的解析和建连分开计时（解析单独 10s，覆盖 Go 解析器的重试窗口，不再被 3s 建连超时切断），并对结果做 60s 缓存、并发合并与失败沿用上次结果，单次上游抖动不会放大成连接失败
   - 查看生成的配置：默认在系统临时目录生成随机文件名的 `ssh-tunnel-tun-*.json`，进程退出即删除；需要保留时用 `TUN_CONFIG` 指定固定路径
   - sing-box 输出按行透传到程序日志，调 `TUN_LOG_LEVEL=debug` 排查分流问题
   - 提示“未找到 sing-box（singbox）”：把对应架构的 sing-box 可执行文件改名为 `singbox` 放在程序同目录（镜像内已内置 `/app/singbox`），或安装到 `PATH`
