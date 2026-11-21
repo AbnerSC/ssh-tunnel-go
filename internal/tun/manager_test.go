@@ -306,3 +306,31 @@ func TestLineWriterSplitsPartialLines(t *testing.T) {
 		t.Fatalf("超长输出应被清空: %d", len(w.buf))
 	}
 }
+
+// TestClosedNoiseClassification 校验 sing-box 输出分级的边界：
+// 连接收尾噪声（下载/上传通道随 endpoint 关闭而断开）降级为调试，
+// 真正的启动失败、权限问题必须保持 ERROR 以便告警。
+func TestClosedNoiseClassification(t *testing.T) {
+	noise := []string{
+		"2026/11/21 10:00:00 +0800 ERROR [2063513061 698ms] connection: connection download closed: close tcp 172.19.0.1:49976->198.18.0.2:443: endpoint not connected",
+		"ERROR connection: connection upload closed: write tcp 172.19.0.1:40001->198.18.0.3:443: endpoint not connected",
+	}
+	for _, line := range noise {
+		if !isClosedNoise(line) {
+			t.Errorf("收尾噪声未被识别: %q", line)
+		}
+	}
+
+	real := []string{
+		"ERROR [tun] open tun device: operation not permitted",
+		"ERROR connection: connection download closed: connection refused",
+		"ERROR dial tcp 172.81.101.78:32192: connect: connection refused",
+		"WARN endpoint not connected",
+		"",
+	}
+	for _, line := range real {
+		if isClosedNoise(line) {
+			t.Errorf("真实故障被误判为噪声: %q", line)
+		}
+	}
+}

@@ -55,3 +55,30 @@ func TestTextHandlerEscapesInjectedNewline(t *testing.T) {
 		t.Fatalf("换行符应被转义为可见形式: %q", out)
 	}
 }
+
+// TestDurationAttrIsHumanReadable 时长字段必须输出可读字符串。
+//
+// time.Duration 直接交给 JSON handler 会被序列成纳秒整数
+// （实测 "elapsed":2509000000），排查耗时分布与超时时几乎无法阅读。
+func TestDurationAttrIsHumanReadable(t *testing.T) {
+	var buf bytes.Buffer
+	lg := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	lg.Debug("直连域名解析完成", withComponent("proxy", []any{
+		"host", "www.baidu.com",
+		"elapsed", 2509 * time.Millisecond,
+	})...)
+	out := buf.String()
+	if !strings.Contains(out, `"elapsed":"2.509s"`) {
+		t.Fatalf("时长应输出为 2.509s: %s", out)
+	}
+	if strings.Contains(out, "2509000000") {
+		t.Fatalf("不应输出纳秒整数: %s", out)
+	}
+
+	buf.Reset()
+	th := &textHandler{out: &buf, level: slog.LevelDebug}
+	slog.New(th).Debug("耗时", withComponent("main", []any{"idleTimeout", 30 * time.Minute})...)
+	if !strings.Contains(buf.String(), "idleTimeout=30m0s") {
+		t.Fatalf("文本格式同样应可读: %q", buf.String())
+	}
+}

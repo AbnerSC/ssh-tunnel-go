@@ -76,6 +76,49 @@ func TestHTTPConnect(t *testing.T) {
 	}
 }
 
+// TestHTTPConnectRejectsUserInfoTarget CONNECT 目标带 userinfo 必须回 400。
+//
+// 普通转发分支已拒绝 `u:p@host` 这类地址，CONNECT 若放行，会把一个任何
+// 解析器都不接受的垃圾地址丢给隧道对端去拨号，既浪费一次往返，
+// 客户端也只能看到含义不明的 502。
+func TestHTTPConnectRejectsUserInfoTarget(t *testing.T) {
+	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+	writeConn(t, conn, []byte("CONNECT user:pass@127.0.0.1:9 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("带 userinfo 的 CONNECT 目标应返回 400: %q", head)
+	}
+
+	// 请求行多一个空格时 Fields 会把版本串当成目标：同样不得进入拨号
+	conn2, br2 := dialProxy(t, addr)
+	writeConn(t, conn2, []byte("CONNECT  HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if head := readHead(t, br2); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("畸形 CONNECT 目标应返回 400: %q", head)
+	}
+
+	// 端口越界同样在解析阶段拒绝
+	conn3, br3 := dialProxy(t, addr)
+	writeConn(t, conn3, []byte("CONNECT example.com:99999 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if head := readHead(t, br3); !strings.HasPrefix(head, "HTTP/1.1 400 Bad Request") {
+		t.Fatalf("端口越界的 CONNECT 应返回 400: %q", head)
+	}
+}
+
+// TestHTTPOverlargeHeaderGets431 请求头超限要回 431，客户端随后应能读到完整应答。
+//
+// 与 TestHTTPHeaderTooLarge 互补：这里用带正常结尾的单个超大头部，
+// 验证「先回 431 再优雅关闭」对完整请求也成立。
+func TestHTTPOverlargeHeaderGets431(t *testing.T) {
+	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
+	conn, br := dialProxy(t, addr)
+	req := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Big: " +
+		strings.Repeat("a", httpMaxHeaderSize) + "\r\n\r\n"
+	writeConn(t, conn, []byte(req))
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 431") {
+		t.Fatalf("请求头超限应返回 431: %q", head)
+	}
+}
+
 func TestHTTPAuthRetryOnSameConnection(t *testing.T) {
 	echoHost, echoPort := startEchoServer(t)
 	creds := NewCredentials("user", "pwd123")
@@ -383,6 +426,10 @@ func TestHTTPBadGateway(t *testing.T) {
 	}
 }
 
+// TestHTTPHeaderTooLarge 超大头部回 431 后关闭，不能静默 RST。
+//
+// 旧实现直接关闭连接：未读完的头部字节还在内核接收队列里，close() 会发 RST，
+// 客户端只能看到「连接被重置」，与网络故障无法区分。
 func TestHTTPHeaderTooLarge(t *testing.T) {
 	addr := startHTTPProxy(t, Credentials{}, directRoute("http"))
 	conn, br := dialProxy(t, addr)
@@ -394,8 +441,8 @@ func TestHTTPHeaderTooLarge(t *testing.T) {
 		}
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := br.ReadByte(); err == nil {
-		t.Fatal("超大头部应直接关闭连接")
+	if head := readHead(t, br); !strings.HasPrefix(head, "HTTP/1.1 431 ") {
+		t.Fatalf("超大头部应返回 431: %q", head)
 	}
 }
 
@@ -415,6 +462,16 @@ func TestParseHostPort(t *testing.T) {
 		{"", 443, "", 0, false},
 		{"[::1", 443, "", 0, false},
 		{"example.com:abc", 443, "", 0, false},
+		// 非法字符的 authority 不能当成合法主机名丢给拨号流程
+		{"HTTP/1.1", 443, "", 0, false},
+		{"u:p@example.com", 443, "", 0, false},
+		{"exa mple.com:443", 80, "", 0, false},
+		{"example.com:0", 443, "", 0, false},
+		{"example.com:65536", 443, "", 0, false},
+		{"[fe80::1%eth0]:80", 443, "", 0, false},
+		{strings.Repeat("a", 254) + ".com", 443, "", 0, false},
+		// IDN 直发的非 ASCII 主机名仍交给解析器判定
+		{"中文.example.com", 80, "中文.example.com", 80, true},
 	}
 	for _, c := range cases {
 		host, port, ok := parseHostPort(c.in, c.def)

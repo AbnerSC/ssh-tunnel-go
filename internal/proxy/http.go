@@ -21,7 +21,7 @@ const (
 	// 只限制首字节不够：逐字节慢速发送（Slowloris）会永久占用连接；
 	// 正常客户端的头部远小于该值，不受影响。
 	httpHeaderTotalTimeout = 15 * time.Second
-	// httpMaxHeaderSize 请求头上限，超过视为非法连接直接关闭
+	// httpMaxHeaderSize 请求头上限，超过则回 431 并关闭连接
 	httpMaxHeaderSize = 64 * 1024
 	// httpReadBuffer 每连接初始读缓冲。常规请求头可在一个缓冲内读完；
 	// 头部较大时由 readHeader 按需累积（上限 httpMaxHeaderSize），
@@ -31,7 +31,7 @@ const (
 	// 填满发送缓冲后 writeAll 会无限阻塞，长期占用连接名额与 goroutine。
 	httpWriteTimeout = 5 * time.Second
 	// httpDrainTimeout / httpMaxDrainBytes 关闭前为规避 RST 而排空残留字节的
-	// 时限与上限，避免被超大/无限正文拖住（见 writeChallengeAndClose）。
+	// 时限与上限，避免被超大/无限正文拖住（见 writeReplyAndClose）。
 	httpDrainTimeout  = 250 * time.Millisecond
 	httpMaxDrainBytes = 256 * 1024
 	// httpMaxChallengesPerConn 单连接上允许的 keep-alive 质询轮次上限。
@@ -64,6 +64,9 @@ var (
 	replyEstablished  = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
 	replyBadGateway   = []byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	replyBadRequest   = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	// replyHeaderTooLarge 请求头超限应答：让客户端拿到明确状态码而不是连接被重置，
+	// 与 nginx/Squid 的行为一致（431，且不会重试同一个请求）
+	replyHeaderTooLarge = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	authChallengeHead = "Proxy-Authenticate: Basic realm=\"ssh-tunnel\", charset=\"UTF-8\"\r\n"
 	replyAuthRequired = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
 		authChallengeHead + "Content-Length: 0\r\n\r\n")
@@ -99,13 +102,16 @@ func handleHTTP(conn net.Conn, creds Credentials, route *Route) {
 			// 本分支紧接着 return 、defer 会关连接，应答必须声明 Connection: close，
 			// 并走优雅关闭避免 RST 丢掉刚发出的 407（否则 Apache / Jetty HttpClient
 			// 会把它当作可复用连接重试，对端看到的却是 reset/EOF）。
-			writeChallengeAndClose(conn, replyAuthRequiredClose)
+			writeReplyAndClose(conn, replyAuthRequiredClose)
 			return
 		}
 		head, err := readHeader(conn, br)
 		if err != nil {
 			if err == errHeaderTooLarge {
-				logging.Warn("http", "http代理请求头过大，关闭", "remote", remote)
+				logging.Warn("http", "http代理请求头过大，已拒绝", "remote", remote, "limit", httpMaxHeaderSize)
+				// 不能直接返回：此时 socket 里还有没收完的头部字节，defer Close 会发 RST，
+				// 客户端只能看到「连接被重置」。先回 431 再半关闭排空。
+				writeReplyAndClose(conn, replyHeaderTooLarge)
 			} else if !errors.Is(err, io.EOF) {
 				logging.Debug("http", "http代理读取请求头失败", "remote", remote, "err", err)
 			}
@@ -172,7 +178,7 @@ func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Crede
 			// 需要关连接，或请求带正文（正文可能已随请求头到达，不消费就会串到
 			// 下一请求）时，走优雅关闭让客户端在新连接上重试。
 			if mustClose || requestHasBody(method, lines, headers) {
-				writeChallengeAndClose(conn, replyAuthRequiredClose)
+				writeReplyAndClose(conn, replyAuthRequiredClose)
 				return false
 			}
 			if !writeChallenge(conn, replyAuthRequired) {
@@ -199,7 +205,10 @@ func handleHTTPRequest(conn net.Conn, br *bufio.Reader, head []byte, creds Crede
 // handleConnect CONNECT 隧道：多用于 HTTPS，建立到 host:port 的透传连接后回 200。
 func handleConnect(conn net.Conn, br *bufio.Reader, uri string, route *Route, remote net.Addr) {
 	host, port, ok := parseHostPort(uri, 443)
-	if !ok {
+	// CONNECT 的目标必须是纯 authority：userinfo（u:p@host:443）、含路径分隔符等
+	// 非法字符的写法在 validHost 就被拒，不能包装成“合法目标”丢给隧道对端解析
+	if !ok || host == "" {
+		logging.Debug("http", "CONNECT 目标不合法", "target", uri, "remote", remote)
 		writeAndClose(conn, replyBadRequest)
 		return
 	}
@@ -241,7 +250,7 @@ func handleForward(conn net.Conn, br *bufio.Reader, method, uri, version string,
 		path = rest[slash:]
 	}
 	host, port, ok := parseHostPort(hostPortStr, 80)
-	if !ok || host == "" || strings.ContainsRune(host, '@') {
+	if !ok || host == "" {
 		writeAndClose(conn, replyBadRequest)
 		return
 	}
@@ -515,6 +524,29 @@ func checkBasicAuth(header string, creds Credentials) bool {
 	return credentialMatch(str[:idx], str[idx+1:], creds.User, creds.Password)
 }
 
+// validHost 校验目标主机名字面量：只允许域名/IPv6 字面量里可能出现的字符。
+//
+// 不做这层校验时，"HTTP/1.1"、"a b"、"u:p@host" 之类的畸形 authority 会被当作
+// 合法主机名丢给拨号流程：既浪费一次解析与建连（表现为 502 而非 400），
+// 也可能把带特殊字符的字符串送到隧道对端去解析。
+// 非 ASCII 字节放行：部分客户端会直接发送 IDN（不做 punycode），交由解析器判定即可。
+func validHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == '_' || c == ':':
+		case c >= 0x80:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // parseHostPort 解析 host:port，兼容 IPv6 字面量 [::1]:port；未给出端口时使用 defaultPort。
 func parseHostPort(hp string, defaultPort int) (string, int, bool) {
 	if hp == "" {
@@ -537,16 +569,28 @@ func parseHostPort(hp string, defaultPort int) (string, int, bool) {
 			if err != nil || !validPort(port) {
 				return "", 0, false
 			}
+			if !validHost(host) {
+				return "", 0, false
+			}
 			return host, port, true
+		}
+		if !validHost(host) {
+			return "", 0, false
 		}
 		return host, defaultPort, true
 	}
 	c := strings.LastIndexByte(hp, ':')
 	if c < 0 {
+		if !validHost(hp) {
+			return "", 0, false
+		}
 		return hp, defaultPort, true
 	}
 	port, err := strconv.Atoi(hp[c+1:])
 	if err != nil || !validPort(port) {
+		return "", 0, false
+	}
+	if !validHost(hp[:c]) {
 		return "", 0, false
 	}
 	return hp[:c], port, true
@@ -594,15 +638,15 @@ func writeChallenge(conn net.Conn, reply []byte) bool {
 	return true
 }
 
-// writeChallengeAndClose 发送 407 应答后准备关闭连接。
+// writeReplyAndClose 写出应答（407/431 等需要关连接的应答）后准备关闭连接。
 //
 // 不能直接 Close 就返回：若请求带正文，正文可能仍在内核接收队列里没读完，
 // close() 在存在未读数据时会发 RST 而非 FIN，RST 会让对端丢弃「已送达但
-// 尚未读」的响应字节——客户端于是拿到 Connection reset 而不是 407，
+// 尚未读」的响应字节——客户端于是拿到 Connection reset 而不是应答，
 // Apache/Jetty HttpClient 会把它归为 I/O 异常，不会触发 reactive 重试。
 // 这里先半关闭发出 FIN 告知响应结束，再在短窗口内有界排空残留字节，
 // 最后交给 defer conn.Close()。排空设上限与超时，避免被超大/无限正文拖住。
-func writeChallengeAndClose(conn net.Conn, reply []byte) {
+func writeReplyAndClose(conn net.Conn, reply []byte) {
 	_ = conn.SetWriteDeadline(time.Now().Add(httpWriteTimeout))
 	_ = writeAll(conn, reply)
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {

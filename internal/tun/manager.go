@@ -300,12 +300,18 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 }
 
 // emit 按行内容粗略分级输出。
+//
+// sing-box 的连接收尾噪声降级为 Debug：客户端提前断开 TCP 时它会把
+// “对端已不在”报成 ERROR（实测每次下载中断一条）。TUN 接管下这是
+// 日常生命周期而非故障，按 ERROR 落盘会淹没真实错误并把日志尺寸快速推高。
 func (w *lineWriter) emit(line string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
 	}
 	switch {
+	case isClosedNoise(line):
+		logging.Debug(w.component, line)
 	case strings.Contains(line, "ERROR"):
 		logging.Error(w.component, line)
 	case strings.Contains(line, "WARN"):
@@ -313,4 +319,11 @@ func (w *lineWriter) emit(line string) {
 	default:
 		logging.Info(w.component, line)
 	}
+}
+
+// isClosedNoise 判断是否为“连接已关闭”类的重复噪声。
+func isClosedNoise(line string) bool {
+	return strings.Contains(line, "endpoint not connected") &&
+		(strings.Contains(line, "connection download closed") ||
+			strings.Contains(line, "connection upload closed"))
 }

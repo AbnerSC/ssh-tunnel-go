@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // loggerName 保证文本模式下日志行可直接被既有规则解析。
@@ -124,7 +125,22 @@ func Error(component, msg string, kv ...any) {
 func withComponent(component string, kv []any) []any {
 	args := make([]any, 0, len(kv)+2)
 	args = append(args, "component", component)
-	return append(args, kv...)
+	args = append(args, kv...)
+	normalizeDurations(args)
+	return args
+}
+
+// normalizeDurations 把 time.Duration 字段值转成可读字符串。
+//
+// slog 的 JSON handler 会把 time.Duration 序列成纳秒整数
+// （实测 "elapsed":2509000000），排查耗时分布、超时上限时几乎不可读；
+// 统一在入口处转成 "2.509s" 这类形式，两种日志格式都能直接看。
+func normalizeDurations(args []any) {
+	for i, v := range args {
+		if d, ok := v.(time.Duration); ok {
+			args[i] = d.String()
+		}
+	}
 }
 
 // sanitizeMaxLen 单个字段值的最大输出长度，避免超长输入把日志放大。

@@ -159,6 +159,49 @@ func TestLoadIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsPortOutOfRange 端口超出 1-65535 必须在配置阶段报错。
+//
+// 否则要等到监听阶段才由内核报错，退出码与「端口被占用」完全相同，
+// 运维无法区分写错端口和端口冲突；SSH_PORT 越界同样没有意义。
+func TestLoadRejectsPortOutOfRange(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"SOCKS_PORT 越界", map[string]string{"SOCKS_PORT": "99999"}, "SOCKS_PORT"},
+		{"HTTP_PORT 越界", map[string]string{"HTTP_PORT": "70000"}, "HTTP_PORT"},
+		{"SSH_PORT 越界", map[string]string{"SSH_SERVER": "root@1.2.3.4", "SSH_PORT": "65536"}, "SSH_PORT"},
+		{"SSH_PORT 为 0", map[string]string{"SSH_SERVER": "root@1.2.3.4", "SSH_PORT": "0"}, "SSH_PORT"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			_, err := Load(NewResolver(nil))
+			if err == nil {
+				t.Fatalf("%v 应被拒绝", c.env)
+			}
+			if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "65535") {
+				t.Fatalf("报错应指出越界端口 %q，实际: %v", c.want, err)
+			}
+		})
+	}
+
+	// 对照组：边界值 65535 合法，0/负数表示不监听同样合法
+	t.Run("边界值放行", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("BIND_ADDR", "127.0.0.1")
+		t.Setenv("SOCKS_PORT", "65535")
+		t.Setenv("HTTP_PORT", "0")
+		if _, err := Load(NewResolver(nil)); err != nil {
+			t.Fatalf("65535/0 应被接受: %v", err)
+		}
+	})
+}
+
 func TestLoadNoWork(t *testing.T) {
 	clearEnv(t)
 	cfg, err := Load(NewResolver(nil))

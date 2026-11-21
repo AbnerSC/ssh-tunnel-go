@@ -152,6 +152,13 @@ func Load(r *Resolver) (*Config, error) {
 			return nil, err
 		}
 	}
+	// 端口上界在配置阶段就拦住：留到监听阶段只会得到一句
+	// 「listen tcp 127.0.0.1:99999: bind: invalid argument」，且退出码与
+	// 端口被占用完全一样，运维无法区分「写错端口」与「端口冲突」
+	if cfg.SocksPort > 65535 || cfg.HTTPPort > 65535 {
+		return nil, fmt.Errorf("代理监听端口必须是 1-65535（0 或负数表示不监听）: SOCKS_PORT=%d HTTP_PORT=%d",
+			cfg.SocksPort, cfg.HTTPPort)
+	}
 	cfg.SocksUser = r.Value("-suser", "SOCKS_USER", "")
 	cfg.SocksPassword = r.Value("-spwd", "SOCKS_PASSWORD", "")
 	cfg.BindAddr = strings.TrimSpace(r.Value("-bind", "BIND_ADDR", ""))
@@ -255,6 +262,9 @@ func Load(r *Resolver) (*Config, error) {
 	}
 
 	if serverHost != "" {
+		if sshPort < 1 || sshPort > 65535 {
+			return nil, fmt.Errorf("SSH_PORT 必须是 1-65535 的端口号: %d", sshPort)
+		}
 		pool, err := r.Int("-pool", "SSH_POOL", 8)
 		if err != nil {
 			return nil, err
