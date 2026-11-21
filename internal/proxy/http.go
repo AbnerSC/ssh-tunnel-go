@@ -61,14 +61,14 @@ var (
 // 凭据，与本代理按 UTF-8 原始字节比较的语义不一致，密码含非 ASCII 字符时永远
 // 匹配不上，用户侧表现同样是「http 代理认证不通过」。
 var (
-	replyEstablished  = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
-	replyBadGateway   = []byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-	replyBadRequest   = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	replyEstablished = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
+	replyBadGateway  = []byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	replyBadRequest  = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	// replyHeaderTooLarge 请求头超限应答：让客户端拿到明确状态码而不是连接被重置，
 	// 与 nginx/Squid 的行为一致（431，且不会重试同一个请求）
 	replyHeaderTooLarge = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-	authChallengeHead = "Proxy-Authenticate: Basic realm=\"ssh-tunnel\", charset=\"UTF-8\"\r\n"
-	replyAuthRequired = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
+	authChallengeHead   = "Proxy-Authenticate: Basic realm=\"ssh-tunnel\", charset=\"UTF-8\"\r\n"
+	replyAuthRequired   = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
 		authChallengeHead + "Content-Length: 0\r\n\r\n")
 	replyAuthRequiredClose = []byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
 		authChallengeHead + "Content-Length: 0\r\nConnection: close\r\n\r\n")
